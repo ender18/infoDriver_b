@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from app.routers import users, auth, permissions, roles
+from app.routers import users, auth, permissions, roles, sms
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="Mi API")
@@ -17,6 +17,7 @@ app.include_router(users.router, prefix="/api")
 app.include_router(auth.router, prefix="/api")
 app.include_router(permissions.router, prefix="/api")
 app.include_router(roles.router, prefix="/api")
+app.include_router(sms.router, prefix="/api")
 
 
 @app.get("/")
