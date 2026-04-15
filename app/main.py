@@ -24,6 +24,6 @@ def root():
     return {"message": "API running"}
 
 
-@app.get("/health")
+@app.get("/api/health")
 def health_check():
     return {"status": "ok", "message": "Backend OK"}
