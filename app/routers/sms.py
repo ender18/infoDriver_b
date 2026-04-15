@@ -4,9 +4,8 @@ from urllib.parse import unquote
 
 router = APIRouter(prefix="/sms", tags=["sms"])
 
-LABSMOBILE_URL = "https://api.labsmobile.com/json/send"
-LABSMOBILE_USER = "prensa@radiotaxirtc.com.co"
-LABSMOBILE_PASSWORD = "8Y03gXgrKabmQmolkPGXnFz4neF0hFpe"
+HABLAME_URL = "https://www.hablame.co/api/sms/v5/send"
+HABLAME_KEY = "qGHawx0oAOVUlyb6tPG9kNzQMGgu4T3eXQD8jOnQW9NCF0Ah9jorhaTUn7RKbKXJw4jtsdImSp1LNDMc6mnBYJT3rWRuDZa5w6fWBq3m0eMqkZExEdHi1zJz72tdAggv"
 
 
 @router.get("/send")
@@ -15,17 +14,20 @@ async def send_sms(numero: str, mensaje: str):
     numero_decoded = unquote(numero)
 
     payload = {
-        "message": mensaje_decoded,
-        "tpoa": "Sender",
-        "recipient": [{"msisdn": numero_decoded}]
+        "priority": True,
+        "messages": [
+            {"to": numero_decoded, "text": mensaje_decoded}
+        ]
     }
 
     async with httpx.AsyncClient() as client:
         response = await client.post(
-            LABSMOBILE_URL,
+            HABLAME_URL,
             json=payload,
-            auth=(LABSMOBILE_USER, LABSMOBILE_PASSWORD),
-            headers={"Content-Type": "application/json"}
+            headers={
+                "Content-Type": "application/json",
+                "X-Hablame-Key": HABLAME_KEY
+            }
         )
 
     if response.status_code != 200:
