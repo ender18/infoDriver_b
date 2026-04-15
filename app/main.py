@@ -22,3 +22,8 @@ app.include_router(roles.router, prefix="/api")
 @app.get("/")
 def root():
     return {"message": "API running"}
+
+
+@app.get("/health")
+def health_check():
+    return {"status": "ok", "message": "Backend OK"}
