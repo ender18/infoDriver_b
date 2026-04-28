@@ -15,12 +15,20 @@ class UserCreate(BaseModel):
     first_name: Optional[str] = Field(None, max_length=100)
     last_name: Optional[str] = Field(None, max_length=100)
 
-# Para actualizar usuario
+# Para actualizar usuario (propio perfil)
 class UserUpdate(BaseModel):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     telephone: Optional[str] = None
     profile_picture: Optional[str] = None
+
+# Para actualizar usuario como admin (incluye is_active)
+class UserAdminUpdate(BaseModel):
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    telephone: Optional[str] = None
+    profile_picture: Optional[str] = None
+    is_active: Optional[bool] = None
 
 # Respuesta de usuario
 class UserResponse(BaseModel):

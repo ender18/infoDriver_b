@@ -51,3 +51,23 @@ def get_current_active_user(
             detail="Inactive user"
         )
     return current_user
+
+
+def require_permission(permission_name: str):
+    """
+    Dependencia de fábrica: verifica que el usuario tenga el permiso indicado.
+    Uso: current_user: User = Depends(require_permission("users:read"))
+    """
+    def check(current_user: User = Depends(get_current_active_user)) -> User:
+        user_permissions = {
+            perm.name
+            for role in current_user.roles
+            for perm in role.permissions
+        }
+        if permission_name not in user_permissions:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Permission required: {permission_name}"
+            )
+        return current_user
+    return check

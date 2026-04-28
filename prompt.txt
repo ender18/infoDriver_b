@@ -1,0 +1,200 @@
+# PROMPT: Módulo de Herramientas — Vue 3 + Vuetify 3
+
+## Contexto
+
+Backend en FastAPI (`http://localhost:8000/api`).
+Frontend: Vue 3 + Vuetify 3, Pinia, Axios.
+Todos los endpoints requieren `Authorization: Bearer <token>`.
+Permiso requerido: `tools:run`.
+
+El módulo ejecuta 6 validadores sobre los conductores de una compañía seleccionada.
+El backend hace los requests a la API externa — el frontend solo llama a nuestro backend.
+
+---
+
+## Endpoint
+
+```
+GET /tools/drivers/validate?company_id={id}
+Authorization: Bearer <token>
+```
+
+### Respuesta exitosa — 200
+```json
+{
+  "company": { "id": 1, "name": "MX Taxi" },
+  "total_drivers": 150,
+  "total_errors": 34,
+  "results": [
+    {
+      "driver_id": "abc-123",
+      "callsign":  "M001",
+      "full_name": "Juan Pérez",
+      "field":     "email",
+      "value":     "juan@ correo.com",
+      "error":     "contiene espacios internos"
+    },
+    {
+      "driver_id": "abc-456",
+      "callsign":  "M002",
+      "full_name": "Maria Lopez",
+      "field":     "authorization",
+      "value":     "abc-456",
+      "error":     "sin autorización registrada"
+    }
+  ]
+}
+```
+
+### Valores posibles del campo `field`
+
+| `field`         | Qué valida                                      |
+|-----------------|-------------------------------------------------|
+| `authorization` | Conductor sin autorización registrada           |
+| `email`         | Formato de correo y duplicados                  |
+| `curp`          | badgeNumber == nationalId + formato CURP válido |
+| `forename`      | Espacios, caracteres especiales, capitalización |
+| `surname`       | Espacios, caracteres especiales, capitalización |
+| `mobile`        | 10 dígitos, formato México (no empieza con 0/1) |
+| `telephone`     | 10 dígitos, formato México (no empieza con 0/1) |
+| `city/region`   | town="Mexico City" y region="CDMX"              |
+
+### Errores posibles del endpoint
+
+| Código | Detalle                                         |
+|--------|-------------------------------------------------|
+| 401    | Token inválido                                  |
+| 403    | Permission required: tools:run                  |
+| 404    | Company not found                               |
+| 502    | No se pudo conectar a la API externa            |
+| 504    | Tiempo de espera agotado                        |
+
+---
+
+## Tarea frontend
+
+### 1. Módulo API — `src/api/tools.js`
+```js
+export const validateDrivers = (companyId) =>
+  api.get('/tools/drivers/validate', { params: { company_id: companyId } })
+```
+
+### 2. Store Pinia — `src/stores/toolsStore.js`
+```js
+state: {
+  selectedCompanyId: null,
+  isLoading: false,
+  result: null,   // respuesta completa: { company, total_drivers, total_errors, results[] }
+  error: null,
+}
+actions:
+  runValidation(companyId)   // llama al API, guarda en result
+  clearResults()
+```
+
+### 3. Vista — `src/views/tools/ToolsView.vue` (`/tools`)
+
+#### Layout general
+```
+┌──────────────────────────────────────────────────────────────┐
+│  Herramientas de Validación                                  │
+├──────────────────────────────────────────────────────────────┤
+│  Compañía: [ Select ▼ ]   [ ▶ Ejecutar validación ]         │
+├──────────────────────────────────────────────────────────────┤
+│  150 conductores consultados  ·  34 errores encontrados      │
+│                                                              │
+│  Filtro por tipo: [Todos] [authorization] [email] [curp]...  │
+│  Buscar: [___________________]                               │
+│                                                              │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │ Callsign │ Nombre │ Campo │ Valor │ Error            │    │
+│  └─────────────────────────────────────────────────────┘    │
+└──────────────────────────────────────────────────────────────┘
+```
+
+#### Select de compañía
+- Carga con `GET /companies/` al montar la vista.
+- Solo muestra compañías con `is_active: true`.
+
+#### Botón "Ejecutar validación"
+- Deshabilitado si no hay compañía seleccionada o si `isLoading`.
+- Muestra spinner mientras espera.
+- Al recibir 502/504: snackbar con mensaje `"No fue posible conectar con la API de {nombre}. Verifica las credenciales."`.
+- Al recibir 403: snackbar con `"Sin permiso para usar herramientas."`.
+
+#### Chips de filtro por `field`
+- Se generan dinámicamente desde los valores únicos de `field` en `results`.
+- Chip "Todos" siempre presente.
+- Al seleccionar un chip, filtra la tabla mostrando solo ese tipo de error.
+- Cada chip muestra el conteo: `email (12)`, `curp (5)`, etc.
+- Color por tipo:
+
+| `field`         | Color Vuetify  |
+|-----------------|----------------|
+| `authorization` | `error` (rojo) |
+| `email`         | `primary`      |
+| `curp`          | `warning`      |
+| `forename`      | `info`         |
+| `surname`       | `info`         |
+| `mobile`        | `success`      |
+| `telephone`     | `success`      |
+| `city/region`   | `secondary`    |
+
+#### Tabla de resultados
+
+```vue
+<v-data-table
+  :headers="headers"
+  :items="filteredResults"
+  :search="search"
+  density="compact"
+  items-per-page="25"
+/>
+```
+
+Columnas: **Callsign · Nombre · Campo · Valor · Error**
+
+- Columna **Campo**: mostrar como `v-chip` con el color del tipo (tabla arriba).
+- Buscador filtra sobre callsign, nombre completo y texto del error.
+- Si `results` está vacío tras ejecutar: card verde con `"✅ Todos los registros son válidos"`.
+- Si aún no se ha ejecutado: ilustración/mensaje de estado vacío `"Selecciona una compañía y ejecuta la validación"`.
+
+#### Botón "Exportar CSV"
+Convierte `filteredResults` (los que están visibles con el filtro activo) a CSV y descarga:
+```js
+const exportCSV = () => {
+  const headers = ['driver_id','callsign','full_name','field','value','error']
+  const rows = filteredResults.value.map(r => headers.map(h => `"${r[h] ?? ''}"`).join(','))
+  const csv = [headers.join(','), ...rows].join('\n')
+  const blob = new Blob([csv], { type: 'text/csv' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a'); a.href = url
+  a.download = `validacion_${selectedCompany.value?.name}_${Date.now()}.csv`
+  a.click(); URL.revokeObjectURL(url)
+}
+```
+
+### 4. Sidebar — `MainLayout.vue`
+```vue
+<v-list-item
+  v-if="auth.hasPermission('tools:run')"
+  to="/tools"
+  prepend-icon="mdi-wrench-check"
+>
+  Herramientas
+</v-list-item>
+```
+
+### 5. Guard de ruta — `src/router/index.js`
+```js
+{ path: '/tools', component: ToolsView, meta: { requiredPermission: 'tools:run' } }
+```
+
+---
+
+## Notas
+
+- La lista de compañías viene de `GET /companies/` (ya implementado).
+- El endpoint puede tardar varios segundos (llama a una API externa) — el loading state es importante.
+- El campo `driver_id` está en los resultados pero no necesita columna en la tabla (puede usarse como `key` en el `v-for`).
+- Los chips de filtro deben recalcularse cada vez que llega una respuesta nueva.

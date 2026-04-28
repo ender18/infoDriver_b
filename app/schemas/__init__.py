@@ -2,10 +2,11 @@ from app.schemas.user import UserCreate, UserUpdate, UserResponse, UserWithRoles
 from app.schemas.role import RoleCreate, RoleUpdate, RoleResponse
 from app.schemas.permission import PermissionCreate, PermissionUpdate, PermissionResponse
 from app.schemas.auth import Token, PasswordChange
+from app.schemas.company import CompanyCreate, CompanyUpdate, CompanyResponse
 
 __all__ = [
     "UserCreate",
-    "UserUpdate", 
+    "UserUpdate",
     "UserResponse",
     "UserWithRolesResponse",
     "RoleCreate",
@@ -15,5 +16,8 @@ __all__ = [
     "PermissionUpdate",
     "PermissionResponse",
     "Token",
-    "PasswordChange"
+    "PasswordChange",
+    "CompanyCreate",
+    "CompanyUpdate",
+    "CompanyResponse"
 ]

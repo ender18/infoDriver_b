@@ -4,9 +4,9 @@ from sqlalchemy.sql import func
 
 from app.database import get_db
 from app.models.user import User
-from app.schemas.user import UserResponse, UserUpdate, UserWithRolesResponse
+from app.schemas.user import UserResponse, UserUpdate, UserAdminUpdate, UserWithRolesResponse
 from app.schemas.auth import PasswordChange
-from app.utils.dependencies import get_current_active_user
+from app.utils.dependencies import get_current_active_user, require_permission
 from app.utils.security import get_password_hash, verify_password
 
 router = APIRouter(prefix="/users", tags=["users"])
@@ -98,7 +98,7 @@ def delete_current_user(
 def get_user(
     user_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(require_permission("users:read"))
 ):
     """
     Obtener información de un usuario por ID
@@ -116,7 +116,7 @@ def list_users(
     skip: int = 0,
     limit: int = 100,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(require_permission("users:read"))
 ):
     """
     Listar todos los usuarios con paginación
@@ -124,11 +124,39 @@ def list_users(
     users = db.query(User).offset(skip).limit(limit).all()
     return users
 
+@router.patch("/{user_id}", response_model=UserResponse)
+def update_user(
+    user_id: int,
+    user_update: UserAdminUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("users:update"))
+):
+    """
+    Editar un usuario por ID (admin).
+    Solo envía los campos que quieres modificar.
+    """
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+
+    update_data = user_update.model_dump(exclude_unset=True)
+
+    for field, value in update_data.items():
+        setattr(user, field, value)
+
+    user.updated_at = func.now()
+    db.commit()
+    db.refresh(user)
+    return user
+
 @router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_user(
     user_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(require_permission("users:delete"))
 ):
     """
     Eliminar un usuario (solo admin debería poder)
@@ -163,7 +191,7 @@ def assign_role_to_user(
     user_id: int,
     role_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(require_permission("users:update"))
 ):
     """
     Asignar un rol a un usuario
@@ -203,7 +231,7 @@ def remove_role_from_user(
     user_id: int,
     role_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(require_permission("users:update"))
 ):
     """
     Quitar un rol de un usuario
@@ -241,7 +269,7 @@ def remove_role_from_user(
 def get_user_roles(
     user_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(require_permission("users:read"))
 ):
     """
     Obtener todos los roles de un usuario

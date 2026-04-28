@@ -6,7 +6,7 @@ from typing import List
 from app.database import get_db
 from app.models import Role, Permission, role_permissions
 from app.schemas import RoleCreate, RoleUpdate, RoleResponse
-from app.utils.dependencies import get_current_active_user
+from app.utils.dependencies import get_current_active_user, require_permission
 from app.models.user import User
 
 router = APIRouter(prefix="/roles", tags=["roles"])
@@ -17,7 +17,7 @@ router = APIRouter(prefix="/roles", tags=["roles"])
 def create_role(
     role: RoleCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(require_permission("roles:create"))
 ):
     """
     Crear un nuevo rol (requiere autenticación)
@@ -47,7 +47,7 @@ def list_roles(
     skip: int = 0,
     limit: int = 100,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(require_permission("roles:read"))
 ):
     """
     Listar todos los roles con paginación
@@ -59,7 +59,7 @@ def list_roles(
 def get_role(
     role_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(require_permission("roles:read"))
 ):
     """
     Obtener un rol por ID
@@ -77,7 +77,7 @@ def update_role(
     role_id: int,
     role_update: RoleUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(require_permission("roles:update"))
 ):
     """
     Actualizar un rol
@@ -113,7 +113,7 @@ def update_role(
 def delete_role(
     role_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(require_permission("roles:delete"))
 ):
     """
     Eliminar un rol (soft delete)
@@ -139,7 +139,7 @@ def assign_permission_to_role(
     role_id: int,
     permission_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(require_permission("roles:update"))
 ):
     """
     Asignar un permiso a un rol
@@ -177,7 +177,7 @@ def remove_permission_from_role(
     role_id: int,
     permission_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(require_permission("roles:update"))
 ):
     """
     Quitar un permiso de un rol
@@ -213,7 +213,7 @@ def remove_permission_from_role(
 def get_role_permissions(
     role_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(require_permission("roles:read"))
 ):
     """
     Obtener todos los permisos de un rol

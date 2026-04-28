@@ -6,7 +6,7 @@ from typing import List
 from app.database import get_db
 from app.models import Permission
 from app.schemas import PermissionCreate, PermissionUpdate, PermissionResponse
-from app.utils.dependencies import get_current_active_user
+from app.utils.dependencies import get_current_active_user, require_permission
 from app.models.user import User
 
 router = APIRouter(prefix="/permissions", tags=["permissions"])
@@ -17,7 +17,7 @@ router = APIRouter(prefix="/permissions", tags=["permissions"])
 def create_permission(
     permission: PermissionCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(require_permission("permissions:create"))
 ):
     """
     Crear un nuevo permiso (requiere autenticación)
@@ -50,7 +50,7 @@ def list_permissions(
     limit: int = 100,
     resource: str = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(require_permission("permissions:read"))
 ):
     """
     Listar todos los permisos con paginación y filtro opcional por recurso
@@ -68,7 +68,7 @@ def list_permissions(
 def get_permission(
     permission_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(require_permission("permissions:read"))
 ):
     """
     Obtener un permiso por ID
@@ -86,7 +86,7 @@ def update_permission(
     permission_id: int,
     permission_update: PermissionUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(require_permission("permissions:update"))
 ):
     """
     Actualizar un permiso
@@ -122,7 +122,7 @@ def update_permission(
 def delete_permission(
     permission_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(require_permission("permissions:delete"))
 ):
     """
     Eliminar un permiso permanentemente
