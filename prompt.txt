@@ -198,3 +198,520 @@ const exportCSV = () => {
 - El endpoint puede tardar varios segundos (llama a una API externa) — el loading state es importante.
 - El campo `driver_id` está en los resultados pero no necesita columna en la tabla (puede usarse como `key` en el `v-for`).
 - Los chips de filtro deben recalcularse cada vez que llega una respuesta nueva.
+
+---
+
+---
+
+# PROMPT: Módulo Saldos de Conductores — Vue 3 + Vuetify 3
+
+## Contexto
+
+Nueva sección dentro de `ToolsView.vue`, implementada como una segunda pestaña (`v-tab`) junto a la validación existente.
+
+Backend en FastAPI (`http://localhost:8000/api`).
+Frontend: Vue 3 + Vuetify 3, Pinia.
+Todos los endpoints requieren `Authorization: Bearer <token>`.
+Permiso requerido: `tools:run` (igual que el módulo de validación).
+
+El módulo consulta los saldos de los conductores de una compañía y muestra únicamente aquellos con `currentBalance > 0`.
+Los datos se **persisten en base de datos** — al cargar la vista se leen de BD. Solo se va a la API externa cuando el usuario pulsa "Consultar saldos", que reemplaza todos los registros de esa compañía en BD.
+Hay también un proceso masivo contable que, para cada conductor, re-verifica su saldo, lo actualiza en BD si cambió, ejecuta el proceso en la API externa y guarda el resultado.
+Los endpoints SSE se consumen con `fetch` nativo (no Axios).
+
+---
+
+## Endpoints backend
+
+### A. Leer datos guardados en BD — JSON normal
+
+```
+GET /tools/drivers/accounts?company_id={id}
+Authorization: Bearer <token>
+```
+
+Respuesta 200:
+```json
+{
+  "company": { "id": 1, "name": "MX Taxi" },
+  "drivers_with_balance": 23,
+  "fetched_at": "2026-04-29T18:00:00+00:00",
+  "results": [
+    {
+      "id": 1,
+      "driver_id": 1464,
+      "callsign": "100",
+      "forename": "Rodrigo",
+      "surname": "Gonzalez",
+      "bank_name": "Azteca",
+      "bank_sort_code": "127180013527930647",
+      "current_balance": 150.50,
+      "outstanding_amount": 0.0,
+      "all_jobs_total": 980.00,
+      "all_jobs_commission": 98.00,
+      "notes": "",
+      "fetched_at": "2026-04-29T18:00:00+00:00",
+      "process_status": null,
+      "process_result": null,
+      "process_balance_before": null,
+      "processed_at": null
+    }
+  ]
+}
+```
+
+- Si no hay registros en BD, `results` es `[]` y `fetched_at` es `null`.
+
+### B. Refrescar desde API externa — SSE
+
+```
+GET /tools/drivers/accounts/refresh?company_id={id}
+Authorization: Bearer <token>
+```
+
+Borra los registros anteriores de esa compañía en BD, consulta la API externa página a página y guarda los nuevos. Emite SSE:
+
+#### Eventos
+
+| type    | Cuándo                          | Campos clave                                         |
+|---------|---------------------------------|------------------------------------------------------|
+| `init`  | Una vez al inicio               | `total`, `total_pages`, `company`                    |
+| `page`  | Una vez por página (50 drivers) | `page`, `total_pages`, `new_results[]`               |
+| `done`  | Al terminar todas las páginas   | `total_drivers`                                      |
+| `error` | Si falla una petición (termina) | `code`, `detail`                                     |
+
+`new_results` en el evento `page` son los conductores de esa página con `currentBalance > 0` (campos de la API externa en camelCase: `driverId`, `forename`, `currentBalance`, etc.).
+
+### C. Procesar conductor individual — JSON normal
+
+```
+POST /tools/drivers/accounts/process/{driver_id}?company_id={id}
+Authorization: Bearer <token>
+```
+
+Procesa un único conductor:
+1. Re-verifica su saldo en la API externa (actualiza BD si cambió).
+2. Ejecuta `ProcessDriverAccount/{driver_id}`.
+3. Guarda resultado en BD.
+
+Respuesta 200:
+```json
+{
+  "driver_id": 460,
+  "forename": "Rodrigo",
+  "surname": "Gonzalez",
+  "status": "done",
+  "balance_before": 150.50,
+  "current_balance": 150.50,
+  "result": "OK",
+  "processed_at": "2026-04-29T18:05:00+00:00"
+}
+```
+
+`status` es `"done"` o `"error"`. Si es `"error"`, `result` contiene el detalle del fallo.
+
+El **proceso masivo** es un loop de llamadas a este endpoint desde el frontend — no hay endpoint bulk en el backend.
+
+### Errores HTTP (previos al stream)
+
+| Código | Detalle                        |
+|--------|--------------------------------|
+| 401    | Token inválido                 |
+| 403    | Permission required: tools:run |
+| 404    | Company not found / sin datos  |
+
+---
+
+## Tarea frontend
+
+### 1. Módulo API — `src/api/tools.js` (añadir)
+
+Solo los SSE (refresh) usan `fetch` nativo. Todo lo demás usa Axios.
+
+```js
+// Lee datos guardados en BD (carga inicial de la vista)
+export const getStoredAccounts = (companyId) =>
+  api.get('/tools/drivers/accounts', { params: { company_id: companyId } })
+
+// Procesa un conductor individual
+export const processDriver = (companyId, driverId) =>
+  api.post(`/tools/drivers/accounts/process/${driverId}`, null, { params: { company_id: companyId } })
+```
+
+### 2. Store Pinia — `src/stores/toolsStore.js` (ampliar)
+
+```js
+// State a añadir
+accountsLoading:   false,
+accountsRefreshing: false,         // true mientras se ejecuta el SSE de refresh
+accountsProcessing: false,         // true mientras se ejecuta el SSE de proceso masivo
+accountsProgress:  { page: 0, total_pages: 0 },
+accountsProcessProgress: { done: 0, total: 0, errors: 0 },
+accountsResult: {
+  company: null,
+  drivers_with_balance: 0,
+  fetched_at: null,
+  results: [],                     // array de registros de BD (snake_case)
+},
+accountsError: null,
+```
+
+```js
+// Acción 1 — cargar desde BD (al montar la vista o cambiar compañía)
+async loadStoredAccounts(companyId) {
+  this.accountsLoading = true
+  this.accountsError   = null
+  try {
+    const { data } = await getStoredAccounts(companyId)
+    this.accountsResult = data
+  } catch (err) {
+    this.accountsError = { code: err.response?.status }
+  } finally {
+    this.accountsLoading = false
+  }
+},
+
+// Acción 2 — refrescar desde API externa (botón "Consultar saldos"), SSE
+async refreshAccounts(companyId, token) {
+  this.accountsRefreshing = true
+  this.accountsError      = null
+  this.accountsProgress   = { page: 0, total_pages: 0 }
+  this.accountsResult     = { company: null, drivers_with_balance: 0, fetched_at: null, results: [] }
+
+  const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000/api'
+  const response = await fetch(
+    `${API_BASE}/tools/drivers/accounts/refresh?company_id=${companyId}`,
+    { headers: { Authorization: `Bearer ${token}` } }
+  )
+
+  if (!response.ok) {
+    this.accountsError      = { code: response.status }
+    this.accountsRefreshing = false
+    return
+  }
+
+  const reader  = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+
+    buffer += decoder.decode(value, { stream: true })
+    const chunks = buffer.split('\n\n')
+    buffer = chunks.pop()
+
+    for (const chunk of chunks) {
+      if (!chunk.startsWith('data: ')) continue
+      const event = JSON.parse(chunk.slice(6))
+
+      if (event.type === 'init') {
+        this.accountsResult.company = event.company
+        this.accountsProgress       = { page: 0, total_pages: event.total_pages }
+
+      } else if (event.type === 'page') {
+        this.accountsProgress.page = event.page
+        // new_results viene en camelCase de la API externa; normalizar a snake_case para consistencia
+        const normalized = event.new_results.map(d => ({
+          driver_id:           d.driverId,
+          callsign:            d.callsign      ?? '',
+          forename:            d.forename,
+          surname:             d.surname,
+          bank_name:           d.bankName      ?? '',
+          bank_sort_code:      d.bankSortCode  ?? '',
+          current_balance:     d.currentBalance,
+          outstanding_amount:  d.outstandingAmount,
+          all_jobs_total:      d.allJobsTotal,
+          all_jobs_commission: d.allJobsCommission,
+          notes:               d.notes ?? '',
+          process_status:      null,
+          process_result:      null,
+          process_balance_before: null,
+          processed_at:        null,
+        }))
+        this.accountsResult.results.push(...normalized)
+        this.accountsResult.drivers_with_balance = this.accountsResult.results.length
+
+      } else if (event.type === 'done') {
+        this.accountsRefreshing = false
+
+      } else if (event.type === 'error') {
+        this.accountsError      = event
+        this.accountsRefreshing = false
+        return
+      }
+    }
+  }
+
+  this.accountsRefreshing = false
+},
+
+// Acción 3 — procesar un solo conductor (llama al endpoint individual)
+async processSingleDriver(companyId, driverId) {
+  const row = this.accountsResult.results.find(r => r.driver_id === driverId)
+  if (row) row.process_status = 'processing'   // feedback visual inmediato
+
+  try {
+    const { data } = await api.post(
+      `/tools/drivers/accounts/process/${driverId}`,
+      null,
+      { params: { company_id: companyId } }
+    )
+    if (row) {
+      row.process_status          = data.status
+      row.process_result          = data.result
+      row.process_balance_before  = data.balance_before
+      row.current_balance         = data.current_balance
+      row.processed_at            = data.processed_at
+    }
+    return data
+  } catch (err) {
+    if (row) {
+      row.process_status = 'error'
+      row.process_result = err.response?.data?.detail ?? 'Error desconocido'
+    }
+    throw err
+  }
+},
+
+// Acción 4 — proceso masivo: loop de llamadas individuales
+async processBulk(companyId) {
+  this.accountsProcessing      = true
+  this.accountsProcessProgress = { done: 0, total: this.accountsResult.results.length, errors: 0 }
+
+  for (const row of [...this.accountsResult.results]) {
+    try {
+      await this.processSingleDriver(companyId, row.driver_id)
+    } catch {
+      this.accountsProcessProgress.errors++
+    }
+    this.accountsProcessProgress.done++
+  }
+
+  this.accountsProcessing = false
+},
+
+clearAccounts() {
+  this.accountsLoading    = false
+  this.accountsRefreshing = false
+  this.accountsProcessing = false
+  this.accountsProgress   = { page: 0, total_pages: 0 }
+  this.accountsProcessProgress = { done: 0, total: 0, errors: 0 }
+  this.accountsResult     = { company: null, drivers_with_balance: 0, fetched_at: null, results: [] }
+  this.accountsError      = null
+},
+```
+
+El token solo lo necesita `refreshAccounts` (SSE con `fetch`): `const auth = useAuthStore(); auth.token`.
+Las demás acciones usan Axios, que ya lleva el token por interceptor.
+
+### 3. Vista — `src/views/tools/ToolsView.vue`
+
+#### Estructura con pestañas
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│  Herramientas de Validación                                    │
+├──────────────────┬─────────────────────────────────────────────┤
+│  Validación      │  Saldos con deuda                           │  ← v-tabs
+├──────────────────┴─────────────────────────────────────────────┤
+│  [contenido de la pestaña activa]                              │
+└────────────────────────────────────────────────────────────────┘
+```
+
+#### Pestaña "Saldos con deuda" — layout completo
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│  Compañía: [ Select ▼ ]  [ ↺ Consultar saldos ]  [ ▶ Procesar ]│
+├────────────────────────────────────────────────────────────────┤
+│  ████████████████░░░░  Consultando: pág 12/50 (24%)           │  ← barra de refresh
+│  ▓▓▓▓▓▓▓░░░░░░░░░░░░  Procesando: 7/23 (2 errores)           │  ← barra de proceso
+├────────────────────────────────────────────────────────────────┤
+│  Última consulta: 29 abr 2026, 18:00  ·  23 conductores        │
+│                                                                │
+│  Buscar: [___________________]          [ ⬇ Exportar CSV ]    │
+│                                                                │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │ Callsign │ Nombre │ Banco │ Cuenta │ Tipo │ Saldo │ Estado │  │
+│  └──────────────────────────────────────────────────────────┘  │
+└────────────────────────────────────────────────────────────────┘
+```
+
+#### Comportamiento al montar / cambiar compañía
+
+Al seleccionar una compañía en el select, llamar `tools.loadStoredAccounts(companyId)`.
+Si `results` tiene datos, mostrarlos. Si no, mostrar estado vacío con el botón "Consultar saldos".
+
+#### Botón "Consultar saldos" (↺ refresh)
+
+- Deshabilitar si no hay compañía o `accountsRefreshing`.
+- Llama `tools.refreshAccounts(companyId, auth.token)`.
+- La tabla se puebla progresivamente a medida que llegan eventos `page`.
+
+#### Botón "Procesar todos" (▶)
+
+- Deshabilitar si: no hay compañía, `accountsProcessing`, `accountsRefreshing`, o `results` está vacío.
+- Mostrar diálogo de confirmación antes de ejecutar: `"¿Procesar {N} conductores con saldo? Esta acción es irreversible."`.
+- Llama `tools.processBulk(companyId)` — el store itera sobre cada conductor llamando `processSingleDriver` en secuencia.
+- Mientras `accountsProcessing`, la columna "Estado" se actualiza fila a fila en tiempo real.
+
+#### Botón "Procesar" por fila (en la tabla)
+
+Cada fila tiene un botón de acción individual (icono `mdi-play-circle`) que llama `tools.processSingleDriver(companyId, row.driver_id)`.
+- Visible solo si `row.process_status !== 'processing'`.
+- Se deshabilita durante `accountsRefreshing`.
+- Muestra spinner en la fila mientras `row.process_status === 'processing'`.
+
+#### Barras de progreso
+
+```vue
+<!-- Refresh -->
+<v-progress-linear
+  v-if="tools.accountsRefreshing"
+  :model-value="refreshPercent"
+  color="primary" height="6" rounded
+/>
+<p v-if="tools.accountsRefreshing" class="text-caption">
+  Consultando: página {{ tools.accountsProgress.page }} / {{ tools.accountsProgress.total_pages }}
+  — {{ tools.accountsResult.drivers_with_balance }} conductores encontrados…
+</p>
+
+<!-- Proceso -->
+<v-progress-linear
+  v-if="tools.accountsProcessing"
+  :model-value="processPercent"
+  color="warning" height="6" rounded
+/>
+<p v-if="tools.accountsProcessing" class="text-caption">
+  Procesando: {{ tools.accountsProcessProgress.done }} / {{ tools.accountsProcessProgress.total }}
+  <span v-if="tools.accountsProcessProgress.errors > 0" class="text-error">
+    ({{ tools.accountsProcessProgress.errors }} errores)
+  </span>
+</p>
+```
+
+```js
+const refreshPercent = computed(() =>
+  tools.accountsProgress.total_pages
+    ? Math.round((tools.accountsProgress.page / tools.accountsProgress.total_pages) * 100)
+    : 0
+)
+const processPercent = computed(() =>
+  tools.accountsProcessProgress.total
+    ? Math.round((tools.accountsProcessProgress.done / tools.accountsProcessProgress.total) * 100)
+    : 0
+)
+```
+
+#### Contadores de resumen
+
+```vue
+<v-chip color="secondary" size="small">
+  Última consulta: {{ formatDate(tools.accountsResult.fetched_at) }}
+</v-chip>
+<v-chip color="error" size="small">
+  {{ tools.accountsResult.drivers_with_balance }} con saldo positivo
+</v-chip>
+```
+
+#### Tabla de resultados
+
+```vue
+<v-data-table
+  :headers="accountHeaders"
+  :items="filteredAccounts"
+  :search="accountSearch"
+  :item-value="r => r.driver_id"
+  density="compact"
+  items-per-page="25"
+/>
+```
+
+Columnas:
+
+| key                              | Header          | Alineación | Notas                                                      |
+|----------------------------------|-----------------|------------|------------------------------------------------------------|
+| `callsign`                       | Callsign        | left       |                                                            |
+| `forename` + `surname`           | Nombre          | left       | columna computada                                          |
+| `bank_name`                      | Banco           | left       |                                                            |
+| `bank_sort_code`                 | Cuenta / CLABE  | left       |                                                            |
+| `account_type` *(computada)*     | Tipo de cuenta  | center     | ver lógica abajo — chip de color                           |
+| `current_balance`                | Saldo actual    | right      | color `error`>500, `warning` 50–500                        |
+| `all_jobs_total`                 | Total viajes    | right      | formato `$1,234.56`                                        |
+| `all_jobs_commission`            | Comisión        | right      | formato `$1,234.56`                                        |
+| `process_status`                 | Estado          | center     | chip: `done`→verde, `error`→rojo, null→gris                |
+| `process_balance_before`         | Saldo verificado| right      | visible si hay al menos un proceso ejecutado               |
+| `processed_at`                   | Procesado       | left       | fecha formateada, null = vacío                             |
+
+##### Columna "Tipo de cuenta" — lógica
+
+```js
+const accountType = (bankSortCode) => {
+  const len = (bankSortCode ?? '').trim().length
+  if (len === 16) return 'TDD'
+  if (len === 18) return 'CLABE'
+  return 'ERROR'
+}
+```
+
+Mostrar como `v-chip` con color según valor:
+
+| Valor   | Color Vuetify |
+|---------|---------------|
+| `TDD`   | `success`     |
+| `CLABE` | `primary`     |
+| `ERROR` | `error`       |
+
+Esta columna es **solo visual** — no se guarda en BD ni se envía al backend.
+En el CSV exportar el valor calculado (`TDD`, `CLABE` o `ERROR`) en una columna `account_type`.
+
+- `process_status` como `v-chip`:
+  - `null` → chip gris `"Pendiente"`
+  - `"done"` → chip verde `"Procesado"`
+  - `"error"` → chip rojo `"Error"`, con tooltip que muestra `process_result`
+
+#### Estado vacío
+
+- Sin compañía seleccionada: `"Selecciona una compañía para ver los saldos"`.
+- Compañía seleccionada pero sin datos en BD: `"No hay datos guardados. Pulsa 'Consultar saldos' para obtenerlos."`.
+- Datos en BD pero ninguno con saldo (tras refresh): card verde `"✅ Ningún conductor tiene saldo pendiente"`.
+
+#### Búsqueda
+
+Filtra por nombre completo y `notes`.
+
+#### Botón "Exportar CSV"
+
+```js
+const exportAccountsCSV = () => {
+  const cols = ['callsign','driver_id','forename','surname',
+                 'bank_name','bank_sort_code','account_type','current_balance',
+                 'all_jobs_total','all_jobs_commission',
+                 'notes','process_status','process_result','process_balance_before','processed_at']
+  const rows = filteredAccounts.value.map(r => {
+    const extra = { ...r, account_type: accountType(r.bank_sort_code) }
+    return cols.map(c => `"${extra[c] ?? ''}"`).join(',')
+  })
+  const csv  = [cols.join(','), ...rows].join('\n')
+  const blob = new Blob([csv], { type: 'text/csv' })
+  const url  = URL.createObjectURL(blob)
+  const a    = document.createElement('a')
+  a.href     = url
+  a.download = `saldos_${tools.accountsResult.company?.name}_${Date.now()}.csv`
+  a.click()
+  URL.revokeObjectURL(url)
+}
+```
+
+---
+
+## Notas
+
+- Al cargar la vista, llamar `loadStoredAccounts` si hay compañía seleccionada — los datos vienen de BD, respuesta rápida.
+- "Consultar saldos" reemplaza completamente los datos de BD de esa compañía y resetea todos los `process_status` a `null`.
+- El proceso masivo opera sobre los registros que están en BD; no vuelve a llamar al refresh.
+- Los valores monetarios son `number` (float) en BD, nunca string.
+- `process_result` puede ser largo (respuesta de la API); truncarlo en el tooltip a 300 caracteres.
+- El token se pasa explícitamente a las acciones SSE porque `fetch` no usa el interceptor de Axios.
