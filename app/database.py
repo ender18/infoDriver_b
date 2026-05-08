@@ -1,5 +1,5 @@
 import os
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from dotenv import load_dotenv
@@ -22,6 +22,12 @@ AUTOCAB_DATABASE_URL = (
 
 autocab_engine = create_engine(AUTOCAB_DATABASE_URL)
 AutocabSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=autocab_engine)
+
+@event.listens_for(autocab_engine, "connect")
+def set_autocab_timezone(dbapi_connection, connection_record):
+    cursor = dbapi_connection.cursor()
+    cursor.execute("SET timezone = 'America/Mexico_City'")
+    cursor.close()
 
 
 def get_db():
