@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -41,8 +41,8 @@ def get_booking_stats(
     if date_to < date_from:
         raise HTTPException(status_code=422, detail="date_to no puede ser anterior a date_from")
 
-    dt_from = datetime(date_from.year, date_from.month, date_from.day, 0,  0,  0)
-    dt_to   = datetime(date_to.year,   date_to.month,   date_to.day,   23, 59, 59)
+    dt_from = datetime(date_from.year, date_from.month, date_from.day, 0, 0, 0)
+    dt_to   = datetime(date_to.year,  date_to.month,   date_to.day,   0, 0, 0) + timedelta(days=1)
 
     try:
         summary_row = autocab_db.execute(text("""
@@ -52,7 +52,7 @@ def get_booking_stats(
                 COUNT(*)                                                  AS total,
                 COUNT(DISTINCT vehicle_callsign)                          AS unique_vehicles
             FROM bookings
-            WHERE pickup_due_time BETWEEN :dt_from AND :dt_to
+            WHERE pickup_due_time >= :dt_from AND pickup_due_time < :dt_to
               AND archive_reason IN ('Completed', 'Cancelled')
         """), {"dt_from": dt_from, "dt_to": dt_to}).fetchone()
 
@@ -64,7 +64,7 @@ def get_booking_stats(
                 COUNT(*)                                                  AS total,
                 COUNT(DISTINCT vehicle_callsign)                          AS unique_vehicles
             FROM bookings
-            WHERE pickup_due_time BETWEEN :dt_from AND :dt_to
+            WHERE pickup_due_time >= :dt_from AND pickup_due_time < :dt_to
               AND archive_reason IN ('Completed', 'Cancelled')
             GROUP BY CAST(pickup_due_time AS DATE)
             ORDER BY date ASC
