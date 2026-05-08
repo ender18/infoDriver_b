@@ -715,3 +715,216 @@ const exportAccountsCSV = () => {
 - Los valores monetarios son `number` (float) en BD, nunca string.
 - `process_result` puede ser largo (respuesta de la API); truncarlo en el tooltip a 300 caracteres.
 - El token se pasa explícitamente a las acciones SSE porque `fetch` no usa el interceptor de Axios.
+
+## Contexto
+
+Backend en FastAPI (`http://localhost:8000/api`).
+Frontend: Vue 3 + Vuetify 3, Pinia, Axios.
+Todos los endpoints requieren `Authorization: Bearer <token>`.
+Permiso requerido: `tools:run`.
+
+El módulo consulta directamente la base de datos de Autocab para obtener conteos de reservas completadas en un rango de fechas. No llama a API externa — la respuesta es inmediata.
+
+---
+
+## Endpoint
+
+```
+GET /stats/bookings/completed?date_from=YYYY-MM-DD&date_to=YYYY-MM-DD
+Authorization: Bearer <token>
+```
+
+### Respuesta exitosa — 200
+```json
+{
+  "date_from": "2026-03-01",
+  "date_to": "2026-03-02",
+  "completed_bookings": 142
+}
+```
+
+### Errores posibles
+
+| Código | Detalle                             |
+|--------|-------------------------------------|
+| 401    | Token inválido                      |
+| 403    | Permission required: tools:run      |
+| 422    | Falta date_from o date_to           |
+| 502    | Error consultando Autocab DB        |
+
+---
+
+## Tarea frontend
+
+### 1. Módulo API — `src/api/stats.js` (nuevo archivo)
+
+```js
+import api from './axios'
+
+export const getCompletedBookings = (dateFrom, dateTo) =>
+  api.get('/stats/bookings/completed', {
+    params: { date_from: dateFrom, date_to: dateTo }
+  })
+```
+
+### 2. Store Pinia — `src/stores/statsStore.js` (nuevo)
+
+```js
+import { defineStore } from 'pinia'
+import { getCompletedBookings } from '@/api/stats'
+
+export const useStatsStore = defineStore('stats', {
+  state: () => ({
+    isLoading:         false,
+    result:            null,   // { date_from, date_to, completed_bookings }
+    error:             null,
+  }),
+  actions: {
+    async fetchCompletedBookings(dateFrom, dateTo) {
+      this.isLoading = true
+      this.error     = null
+      this.result    = null
+      try {
+        const { data } = await getCompletedBookings(dateFrom, dateTo)
+        this.result = data
+      } catch (err) {
+        this.error = { code: err.response?.status, detail: err.response?.data?.detail }
+      } finally {
+        this.isLoading = false
+      }
+    },
+    clear() {
+      this.isLoading = false
+      this.result    = null
+      this.error     = null
+    },
+  },
+})
+```
+
+### 3. Vista — `src/views/stats/StatsView.vue` (`/stats`)
+
+#### Layout general
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  Estadísticas de Reservas                                    │
+├──────────────────────────────────────────────────────────────┤
+│  Desde: [ 2026-03-01 📅 ]   Hasta: [ 2026-03-02 📅 ]        │
+│                             [ 🔍 Consultar ]                 │
+├──────────────────────────────────────────────────────────────┤
+│                                                              │
+│   ┌─────────────────────────────────────────────┐           │
+│   │                                             │           │
+│   │         142                                 │           │
+│   │   Reservas completadas                      │           │
+│   │   01 mar 2026 → 02 mar 2026                 │           │
+│   │                                             │           │
+│   └─────────────────────────────────────────────┘           │
+│                                                              │
+└──────────────────────────────────────────────────────────────┘
+```
+
+#### Selectores de fecha
+
+Usar `v-text-field` con `type="date"` o `v-date-picker` de Vuetify 3.
+
+```vue
+<v-text-field
+  v-model="dateFrom"
+  type="date"
+  label="Desde"
+  :max="dateTo || undefined"
+/>
+<v-text-field
+  v-model="dateTo"
+  type="date"
+  label="Hasta"
+  :min="dateFrom || undefined"
+/>
+```
+
+- Al iniciar, `dateFrom` = primer día del mes actual, `dateTo` = hoy.
+- `dateTo` no puede ser anterior a `dateFrom` (validar con `:min`).
+
+#### Botón "Consultar"
+
+- Deshabilitado si `!dateFrom || !dateTo || stats.isLoading`.
+- Muestra spinner (`v-progress-circular`) mientras `stats.isLoading`.
+- Al pulsar: llama `stats.fetchCompletedBookings(dateFrom, dateTo)`.
+
+#### Tarjeta de resultado
+
+Visible solo cuando `stats.result` no es null:
+
+```vue
+<v-card class="text-center pa-8" color="primary" variant="tonal" rounded="xl">
+  <div class="text-h2 font-weight-bold">
+    {{ stats.result.completed_bookings.toLocaleString() }}
+  </div>
+  <div class="text-subtitle-1 mt-2">Reservas completadas</div>
+  <div class="text-caption mt-1 text-medium-emphasis">
+    {{ formatDate(stats.result.date_from) }} → {{ formatDate(stats.result.date_to) }}
+  </div>
+</v-card>
+```
+
+#### Estado de carga
+
+Mientras `stats.isLoading`, mostrar skeleton o spinner centrado en lugar de la tarjeta:
+
+```vue
+<v-skeleton-loader v-if="stats.isLoading" type="card" />
+```
+
+#### Manejo de errores
+
+- 502: snackbar rojo `"No fue posible conectar con la base de datos de Autocab."`
+- 422: snackbar amarillo `"Debes seleccionar un rango de fechas válido."`
+- Otros: snackbar rojo con `error.detail` o `"Error inesperado"`.
+
+#### Estado vacío inicial
+
+Antes de la primera consulta, mostrar mensaje neutral:
+
+```vue
+<v-empty-state
+  icon="mdi-chart-bar"
+  title="Selecciona un rango de fechas"
+  text="Los resultados aparecerán aquí."
+/>
+```
+
+```js
+const formatDate = (dateStr) =>
+  new Date(dateStr + 'T00:00:00').toLocaleDateString('es-MX', {
+    day: '2-digit', month: 'short', year: 'numeric'
+  })
+```
+
+### 4. Sidebar — `MainLayout.vue`
+
+```vue
+<v-list-item
+  v-if="auth.hasPermission('tools:run')"
+  to="/stats"
+  prepend-icon="mdi-chart-bar"
+>
+  Estadísticas
+</v-list-item>
+```
+
+### 5. Guard de ruta — `src/router/index.js`
+
+```js
+{ path: '/stats', component: StatsView, meta: { requiredPermission: 'tools:run' } }
+```
+
+---
+
+## Notas
+
+- La consulta aplica `archive_reason = 'Completed'` — solo reservas terminadas, no canceladas ni en curso.
+- El rango de fechas es inclusivo en ambos extremos (00:00:00 → 23:59:59).
+- La respuesta es rápida (consulta directa a BD local) — no necesita SSE ni polling.
+- Por ahora solo hay un KPI (`completed_bookings`). La tarjeta debe estar diseñada para poder agregar más métricas debajo en el futuro sin reestructurar el layout.

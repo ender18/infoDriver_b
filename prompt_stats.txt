@@ -1,0 +1,270 @@
+# PROMPT: Módulo Estadísticas de Reservas — Vue 3 + Vuetify 3
+
+## Contexto
+
+Backend en FastAPI (`http://localhost:8000/api`).
+Frontend: Vue 3 + Vuetify 3, Pinia, Axios.
+Todos los endpoints requieren `Authorization: Bearer <token>`.
+Permiso requerido: `stats:read`.
+
+El módulo consulta la base de datos de Autocab para obtener un resumen de reservas completadas y canceladas en un rango de fechas, con desglose por día. No llama a API externa — la respuesta es inmediata.
+
+---
+
+## Endpoint
+
+```
+GET /stats/bookings/summary?date_from=YYYY-MM-DD&date_to=YYYY-MM-DD
+Authorization: Bearer <token>
+```
+
+### Respuesta exitosa — 200
+
+```json
+{
+  "date_from": "2026-03-01",
+  "date_to":   "2026-03-02",
+  "summary": {
+    "completed":       142,
+    "cancelled":        38,
+    "total":           180,
+    "unique_vehicles":   5
+  },
+  "by_day": [
+    { "date": "2026-03-01", "completed": 80, "cancelled": 20, "total": 100, "unique_vehicles": 4 },
+    { "date": "2026-03-02", "completed": 62, "cancelled": 18, "total":  80, "unique_vehicles": 3 }
+  ]
+}
+```
+
+### Errores posibles
+
+| Código | Detalle                                         |
+|--------|-------------------------------------------------|
+| 401    | Token inválido o ausente                        |
+| 403    | Permission required: stats:read                 |
+| 422    | date_to anterior a date_from / params faltantes |
+| 502    | Error consultando la base de datos de Autocab   |
+
+---
+
+## Tarea frontend
+
+### 1. Módulo API — `src/api/stats.js` (nuevo archivo)
+
+```js
+import api from './axios'
+
+export const getBookingsSummary = (dateFrom, dateTo) =>
+  api.get('/stats/bookings/summary', {
+    params: { date_from: dateFrom, date_to: dateTo }
+  })
+```
+
+### 2. Store Pinia — `src/stores/statsStore.js` (nuevo)
+
+```js
+import { defineStore } from 'pinia'
+import { getBookingsSummary } from '@/api/stats'
+
+export const useStatsStore = defineStore('stats', {
+  state: () => ({
+    isLoading: false,
+    result:    null,   // { date_from, date_to, summary, by_day[] }
+    error:     null,
+  }),
+  actions: {
+    async fetchBookingsSummary(dateFrom, dateTo) {
+      this.isLoading = true
+      this.error     = null
+      this.result    = null
+      try {
+        const { data } = await getBookingsSummary(dateFrom, dateTo)
+        this.result = data
+      } catch (err) {
+        this.error = { code: err.response?.status, detail: err.response?.data?.detail }
+      } finally {
+        this.isLoading = false
+      }
+    },
+    clear() {
+      this.isLoading = false
+      this.result    = null
+      this.error     = null
+    },
+  },
+})
+```
+
+### 3. Vista — `src/views/stats/StatsView.vue` (`/stats`)
+
+#### Layout general
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│  Estadísticas de Reservas                                        │
+├──────────────────────────────────────────────────────────────────┤
+│  Desde: [ 2026-03-01 ]   Hasta: [ 2026-03-02 ]  [ Consultar ]   │
+├──────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌────────────────┐   │
+│  │   142    │  │    38    │  │   180    │  │       5        │   │
+│  │Completad.│  │Cancelad. │  │  Total   │  │Vehíc. únicos   │   │
+│  └──────────┘  └──────────┘  └──────────┘  └────────────────┘   │
+│                                                                  │
+│  ┌──────────────────────────────────────────────────────────┐    │
+│  │ Fecha      │ Completadas │ Canceladas │ Total │ Vehículos │    │
+│  │ 01 mar     │     80      │     20     │  100  │     4     │    │
+│  │ 02 mar     │     62      │     18     │   80  │     3     │    │
+│  └──────────────────────────────────────────────────────────┘    │
+│                                                                  │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+#### Selectores de fecha
+
+```vue
+<v-text-field v-model="dateFrom" type="date" label="Desde" :max="dateTo || undefined" />
+<v-text-field v-model="dateTo"   type="date" label="Hasta" :min="dateFrom || undefined" />
+```
+
+- Al iniciar: `dateFrom` = primer día del mes actual, `dateTo` = hoy.
+
+#### Botón "Consultar"
+
+- Deshabilitado si `!dateFrom || !dateTo || stats.isLoading`.
+- Spinner mientras `stats.isLoading`.
+- Al pulsar: `stats.fetchBookingsSummary(dateFrom, dateTo)`.
+
+#### Tarjetas KPI (resumen global)
+
+Cuatro `v-card` en fila usando `v-row` + `v-col cols="6" sm="3"`. Una por campo de `summary`:
+
+| Campo             | Label             | Color chip    |
+|-------------------|-------------------|---------------|
+| `completed`       | Completadas       | `success`     |
+| `cancelled`       | Canceladas        | `error`       |
+| `total`           | Total             | `primary`     |
+| `unique_vehicles` | Vehículos únicos  | `secondary`   |
+
+```vue
+<v-card variant="tonal" :color="color" rounded="lg" class="text-center pa-4">
+  <div class="text-h3 font-weight-bold">{{ value.toLocaleString() }}</div>
+  <div class="text-caption mt-1">{{ label }}</div>
+</v-card>
+```
+
+#### Tabla de desglose por día
+
+```vue
+<v-data-table
+  :headers="headers"
+  :items="stats.result.by_day"
+  density="compact"
+  hide-default-footer
+  :items-per-page="-1"
+/>
+```
+
+Columnas:
+
+| key               | Header           | Alineación |
+|-------------------|------------------|------------|
+| `date`            | Fecha            | left       |
+| `completed`       | Completadas      | center     |
+| `cancelled`       | Canceladas       | center     |
+| `total`           | Total            | center     |
+| `unique_vehicles` | Vehículos únicos | center     |
+
+- Columna `date`: formatear con `formatDate(row.date)`.
+- Fila de **totales** fija al fondo con los valores de `summary` en negrita.
+- Si `by_day` tiene un solo día, ocultar la tabla y mostrar solo las tarjetas KPI.
+
+```js
+const headers = [
+  { title: 'Fecha',            key: 'date',            align: 'start'  },
+  { title: 'Completadas',      key: 'completed',       align: 'center' },
+  { title: 'Canceladas',       key: 'cancelled',       align: 'center' },
+  { title: 'Total',            key: 'total',           align: 'center' },
+  { title: 'Vehículos únicos', key: 'unique_vehicles', align: 'center' },
+]
+
+const formatDate = (dateStr) =>
+  new Date(dateStr + 'T00:00:00').toLocaleDateString('es-MX', {
+    day: '2-digit', month: 'short', year: 'numeric'
+  })
+```
+
+#### Estado de carga
+
+```vue
+<v-skeleton-loader v-if="stats.isLoading" type="card, table" />
+```
+
+#### Manejo de errores
+
+- 502: snackbar rojo `"No fue posible conectar con la base de datos de Autocab."`
+- 422: snackbar amarillo `"El rango de fechas no es válido."`
+- Otros: snackbar rojo con `error.detail` o `"Error inesperado"`.
+
+#### Estado vacío inicial
+
+```vue
+<v-empty-state
+  icon="mdi-chart-bar"
+  title="Selecciona un rango de fechas"
+  text="El resumen y el desglose por día aparecerán aquí."
+/>
+```
+
+#### Botón "Exportar CSV"
+
+Exporta el desglose `by_day` más una fila final de totales:
+
+```js
+const exportCSV = () => {
+  const cols = ['date', 'completed', 'cancelled', 'total', 'unique_vehicles']
+  const rows = stats.result.by_day.map(r =>
+    cols.map(c => `"${r[c] ?? ''}"`).join(',')
+  )
+  const totals = cols.map(c =>
+    c === 'date' ? '"TOTAL"' : `"${stats.result.summary[c] ?? ''}"`
+  ).join(',')
+  const csv  = [cols.join(','), ...rows, totals].join('\n')
+  const blob = new Blob([csv], { type: 'text/csv' })
+  const url  = URL.createObjectURL(blob)
+  const a    = document.createElement('a')
+  a.href     = url
+  a.download = `stats_${stats.result.date_from}_${stats.result.date_to}.csv`
+  a.click()
+  URL.revokeObjectURL(url)
+}
+```
+
+### 4. Sidebar — `MainLayout.vue`
+
+```vue
+<v-list-item
+  v-if="auth.hasPermission('stats:read')"
+  to="/stats"
+  prepend-icon="mdi-chart-bar"
+>
+  Estadísticas
+</v-list-item>
+```
+
+### 5. Guard de ruta — `src/router/index.js`
+
+```js
+{ path: '/stats', component: StatsView, meta: { requiredPermission: 'stats:read' } }
+```
+
+---
+
+## Notas
+
+- `summary` son los totales del período completo; `by_day` es el desglose diario.
+- Si `by_day` tiene un solo elemento (rango de un día), omitir la tabla y mostrar solo las tarjetas KPI.
+- El rango de fechas es inclusivo: 00:00:00 → 23:59:59 (el backend lo maneja, el frontend solo envía `YYYY-MM-DD`).
+- La respuesta no incluye días sin reservas — si un día no aparece en `by_day` es porque no hubo ninguna.
+- Las tarjetas KPI deben poder crecer: si en el futuro se agrega un campo nuevo a `summary`, solo hay que agregar una tarjeta más sin reestructurar el layout.

@@ -80,6 +80,9 @@ PERMISSIONS_DATA = [
     # Tools
     {"name": "tools:run", "resource": "tools", "action": "run", "description": "Run validation tools"},
 
+    # Stats
+    {"name": "stats:read", "resource": "stats", "action": "read", "description": "View statistics"},
+
     # System
     {"name": "system:settings", "resource": "system", "action": "settings", "description": "System settings"},
     {"name": "system:logs",     "resource": "system", "action": "logs",     "description": "View logs"},
@@ -114,6 +117,7 @@ def create_initial_data():
             "roles:read",
             "companies:read",
             "tools:run",
+            "stats:read",
         ] if n in perm_by_name]
         _assign_permissions_to_role(moderator_role, moderator_perms)
 
