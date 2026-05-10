@@ -1,0 +1,148 @@
+# PROMPT: Módulo Stats Conductores — Vue 3 + Vuetify 3
+
+## Contexto
+
+Backend en FastAPI (`http://localhost:8000/api`).
+Frontend: Vue 3 + Vuetify 3, Pinia, Axios.
+Todos los endpoints requieren `Authorization: Bearer <token>`.
+Permiso requerido: `stats:read`.
+
+El módulo consulta la API externa de Autocab para obtener la lista de conductores activos,
+y cruza con la base de datos interna para obtener su rendimiento día a día en los últimos 15 días
+y su histórico total. La respuesta puede tardar unos segundos (llama a API externa + BD).
+
+---
+
+## Endpoint
+
+```
+GET /stats/drivers/summary?company_id=<id>
+Authorization: Bearer <token>
+```
+
+### Respuesta exitosa — 200
+
+```json
+{
+  "company": { "id": 1, "name": "MX Taxi" },
+  "total_drivers": 120,
+  "drivers": [
+    {
+      "id": 58,
+      "callsign": "100",
+      "forename": "Armando",
+      "surname": "Morales Sanchez",
+      "full_name": "Armando Morales Sanchez",
+      "mobile": "5637885651",
+      "active": true,
+      "last_15_days": [
+        { "date": "2026-04-25", "completed": 8,  "cancelled": 1, "total": 9  },
+        { "date": "2026-04-26", "completed": 0,  "cancelled": 0, "total": 0  },
+        { "date": "2026-04-27", "completed": 11, "cancelled": 2, "total": 13 },
+        { "date": "2026-04-28", "completed": 7,  "cancelled": 0, "total": 7  },
+        { "date": "2026-04-29", "completed": 0,  "cancelled": 0, "total": 0  },
+        { "date": "2026-04-30", "completed": 9,  "cancelled": 1, "total": 10 },
+        { "date": "2026-05-01", "completed": 6,  "cancelled": 0, "total": 6  },
+        { "date": "2026-05-02", "completed": 10, "cancelled": 3, "total": 13 },
+        { "date": "2026-05-03", "completed": 0,  "cancelled": 0, "total": 0  },
+        { "date": "2026-05-04", "completed": 8,  "cancelled": 1, "total": 9  },
+        { "date": "2026-05-05", "completed": 12, "cancelled": 0, "total": 12 },
+        { "date": "2026-05-06", "completed": 9,  "cancelled": 2, "total": 11 },
+        { "date": "2026-05-07", "completed": 7,  "cancelled": 0, "total": 7  },
+        { "date": "2026-05-08", "completed": 11, "cancelled": 1, "total": 12 },
+        { "date": "2026-05-09", "completed": 5,  "cancelled": 0, "total": 5  }
+      ],
+      "all_time": { "completed": 230, "cancelled": 12, "total": 242 },
+      "last_booking_at": "2026-05-09T18:42:00-05:00"
+    }
+  ]
+}
+```
+
+### Errores posibles
+
+| Código | Detalle                                        |
+|--------|------------------------------------------------|
+| 401    | Token inválido o ausente                       |
+| 403    | Permission required: stats:read                |
+| 404    | Company not found                              |
+| 502    | Error conectando a Autocab API o base de datos |
+| 504    | Timeout al conectar con Autocab API            |
+
+---
+
+## Tarea frontend
+
+### 1. Módulo API — `src/api/stats.js` (agregar función)
+
+```js
+export const getDriversSummary = (companyId) =>
+  api.get('/stats/drivers/summary', { params: { company_id: companyId } })
+```
+
+### 2. Store Pinia — `src/stores/statsStore.js` (agregar al store existente)
+
+```js
+// state
+driversResult:    null,
+isLoadingDrivers: false,
+
+// action
+async fetchDriversSummary(companyId) {
+  this.isLoadingDrivers = true
+  try {
+    const { data } = await getDriversSummary(companyId)
+    this.driversResult = data
+  } catch (e) {
+    throw e
+  } finally {
+    this.isLoadingDrivers = false
+  }
+}
+```
+
+### 3. Vista — `src/views/StatsDriversView.vue` (nueva vista)
+
+#### Controles superiores
+- Botón **"Actualizar"** que llama al endpoint (con spinner mientras carga)
+- El `company_id` se obtiene del usuario autenticado (igual que otros módulos)
+
+#### Chips de resumen (arriba de la tabla)
+Calcular desde `driversResult.drivers`:
+- **Total conductores** → `total_drivers`
+- **Activos últimos 15 días** → conductores con al menos 1 viaje en `last_15_days`
+- **Completadas (15 días)** → suma de todos los `last_15_days[].completed`
+- **Canceladas (15 días)** → suma de todos los `last_15_days[].cancelled`
+
+#### Tabla principal — `v-data-table`
+
+Columnas:
+
+| Columna          | Campo                        | Notas                                                      |
+|------------------|------------------------------|------------------------------------------------------------|
+| Callsign         | `callsign`                   | Ordenable                                                  |
+| Conductor        | `full_name`                  | Ordenable                                                  |
+| Teléfono         | `mobile`                     |                                                            |
+| Últ. 15d — Comp. | suma `last_15_days[].completed` | Ordenable                                               |
+| Últ. 15d — Canc. | suma `last_15_days[].cancelled` | Ordenable                                               |
+| Últ. 15d — Total | suma `last_15_days[].total`  | Ordenable                                                  |
+| Hist. Comp.      | `all_time.completed`         | Ordenable                                                  |
+| Hist. Canc.      | `all_time.cancelled`         | Ordenable                                                  |
+| Hist. Total      | `all_time.total`             | Ordenable                                                  |
+| Último booking   | `last_booking_at`            | Formato `DD/MM/YYYY HH:mm`, mostrar `—` si es null        |
+
+- Buscador por nombre o callsign
+- Conductores con suma de últimos 15 días = 0 → mostrar chip `Sin actividad` en gris
+- Skeleton loader mientras `isLoadingDrivers` es true
+
+#### Fila expandible (detalle por día)
+Al hacer clic en una fila, expandirla mostrando una mini-tabla o sparkline con el desglose
+día a día de `last_15_days`:
+
+| Fecha      | Completadas | Canceladas | Total |
+|------------|-------------|------------|-------|
+| 25/04/2026 | 8           | 1          | 9     |
+| 26/04/2026 | 0           | 0          | 0     |
+| ...        | ...         | ...        | ...   |
+
+Los días con `total === 0` mostrarlos en gris/apagado.

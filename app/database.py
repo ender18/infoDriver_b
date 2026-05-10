@@ -23,8 +23,8 @@ AUTOCAB_DATABASE_URL = (
 autocab_engine = create_engine(AUTOCAB_DATABASE_URL)
 AutocabSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=autocab_engine)
 
-@event.listens_for(autocab_engine, "connect")
-def set_autocab_timezone(dbapi_connection, connection_record):
+@event.listens_for(autocab_engine, "checkout")
+def set_autocab_timezone(dbapi_connection, connection_record, connection_proxy):
     cursor = dbapi_connection.cursor()
     cursor.execute("SET timezone = 'America/Mexico_City'")
     cursor.close()
