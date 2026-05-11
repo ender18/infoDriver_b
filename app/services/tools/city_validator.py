@@ -1,5 +1,5 @@
-TOWN_EXPECTED   = "Mexico City"
-REGION_EXPECTED = "CDMX"
+ALLOWED_TOWNS   = {"Mexico City", "Xalapa", "EDOMEX", "Veracruz"}
+ALLOWED_REGIONS = {"CDMX", "EDOMEX", "Veracruz"}
 
 
 def run(drivers: list[dict], authorizations: list[dict]) -> list[dict]:
@@ -8,7 +8,7 @@ def run(drivers: list[dict], authorizations: list[dict]) -> list[dict]:
         addr   = d.get("postalAddress") or {}
         town   = addr.get("town",   "") or ""
         region = addr.get("region", "") or ""
-        errors = _check(town, TOWN_EXPECTED, "town") + _check(region, REGION_EXPECTED, "region")
+        errors = _check(town, ALLOWED_TOWNS, "town") + _check(region, ALLOWED_REGIONS, "region")
         for error in errors:
             results.append({
                 "driver_id": d.get("id"),
@@ -21,13 +21,16 @@ def run(drivers: list[dict], authorizations: list[dict]) -> list[dict]:
     return results
 
 
-def _check(value: str, expected: str, campo: str) -> list[str]:
+def _check(value: str, allowed: set, campo: str) -> list[str]:
     if not value or not value.strip():
         return [f"{campo}: campo vacío"]
-    if value == expected:
+    if value in allowed:
         return []
-    if value.strip().lower() == expected.lower():
-        return [f"{campo}: capitalización incorrecta → {value!r} (esperado: {expected!r})"]
-    if value.strip() == expected:
+    lower_map = {v.lower(): v for v in allowed}
+    stripped = value.strip()
+    if stripped.lower() in lower_map:
+        return [f"{campo}: capitalización incorrecta → {value!r} (esperado: {lower_map[stripped.lower()]!r})"]
+    if stripped in allowed:
         return [f"{campo}: tiene espacios extra"]
-    return [f"{campo}: valor incorrecto → {value!r} (esperado: {expected!r})"]
+    allowed_str = ", ".join(sorted(allowed))
+    return [f"{campo}: valor no permitido → {value!r} (permitidos: {allowed_str})"]
