@@ -5,9 +5,10 @@ ALLOWED_REGIONS = {"CDMX", "EDOMEX", "Veracruz"}
 def run(drivers: list[dict], authorizations: list[dict]) -> list[dict]:
     results = []
     for d in drivers:
-        addr   = d.get("postalAddress") or {}
-        town   = addr.get("town",   "") or ""
-        region = addr.get("region", "") or ""
+        addr     = d.get("postalAddress") or {}
+        town     = addr.get("town",     "") or ""
+        region   = addr.get("region",   "") or ""
+        postcode = addr.get("postcode", "") or ""
         errors = _check(town, ALLOWED_TOWNS, "town") + _check(region, ALLOWED_REGIONS, "region")
         for error in errors:
             results.append({
@@ -16,6 +17,7 @@ def run(drivers: list[dict], authorizations: list[dict]) -> list[dict]:
                 "full_name": d.get("fullName"),
                 "field":     "city/region",
                 "value":     f"town={town or '(vacío)'} | region={region or '(vacío)'}",
+                "postcode":  postcode,
                 "error":     error,
             })
     return results
