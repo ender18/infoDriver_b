@@ -1,0 +1,449 @@
+# PROMPT: Histórico de Saldos — Frontend Vue 3 + Vuetify 3
+
+## Contexto
+
+Frontend: `/home/ender/Projects/infoDriver_f`
+Stack: Vue 3 (Composition API), Vuetify 3, Pinia, Axios.
+Backend: `http://localhost:8000/api` — todos los endpoints requieren `Authorization: Bearer <token>`.
+
+El módulo de saldos (`/tools/drivers-accounts` → `DriversAccounts.vue`) ya funciona
+y NO se debe romper. Solo se añaden:
+
+1. Una columna `payment_status` en la tabla existente.
+2. Una vista nueva de histórico con sus rutas y store.
+
+---
+
+## Lo que ya existe (no tocar la lógica actual)
+
+- `src/views/modules/DriversAccounts.vue` — vista de saldos activos con SSE refresh y proceso
+- `src/stores/toolsStore.js` — store de cuentas con `loadStoredAccounts`, `refreshAccounts`,
+  `processSingleDriver`, `processBulk`, `clearAccounts`
+- `src/router/modules/modules.js` — rutas de herramientas
+- `src/services/api.js` — instancia Axios con interceptor de token
+
+---
+
+## Nuevos endpoints del backend
+
+### Listar sesiones históricas
+```
+GET /tools/drivers/accounts/history?company_id={id}
+Authorization: Bearer <token>
+```
+Respuesta 200:
+```json
+{
+  "company": { "id": 1, "name": "MX Taxi" },
+  "sessions": [
+    {
+      "session_id":           "uuid-v4",
+      "fetched_at":           "2026-05-12T18:00:00+00:00",
+      "drivers_with_balance": 23,
+      "processed_count":      21,
+      "paid_count":           0
+    }
+  ]
+}
+```
+
+### Detalle de una sesión
+```
+GET /tools/drivers/accounts/history/{session_id}?company_id={id}
+Authorization: Bearer <token>
+```
+Respuesta 200:
+```json
+{
+  "company":    { "id": 1, "name": "MX Taxi" },
+  "session_id": "uuid-v4",
+  "results": [
+    {
+      "id": 1,
+      "driver_id": 1464,
+      "session_id": "uuid-v4",
+      "callsign": "100",
+      "forename": "Rodrigo",
+      "surname": "Gonzalez",
+      "bank_name": "Azteca",
+      "bank_sort_code": "127180013527930647",
+      "current_balance": 150.50,
+      "outstanding_amount": 0.0,
+      "all_jobs_total": 980.00,
+      "all_jobs_commission": 98.00,
+      "notes": "",
+      "fetched_at": "2026-05-12T18:00:00+00:00",
+      "process_status": "done",
+      "process_result": "OK",
+      "process_balance_before": 150.50,
+      "processed_at": "2026-05-12T18:05:00+00:00",
+      "payment_status": null,
+      "peibo_transaction_id": null,
+      "peibo_tracking_code": null,
+      "peibo_paid_at": null,
+      "webhook_status": null,
+      "webhook_transaction_id": null,
+      "webhook_date_time": null,
+      "webhook_concept": null,
+      "webhook_reference": null,
+      "webhook_amount": null,
+      "webhook_beneficiary_account": null,
+      "webhook_originator_account": null,
+      "webhook_originator_bank": null,
+      "webhook_originator_name": null,
+      "webhook_originator_tax_id": null,
+      "webhook_type": null,
+      "webhook_refund_reason_code": null,
+      "webhook_received_at": null
+    }
+  ]
+}
+```
+
+### Log de auditoría
+```
+GET /tools/drivers/accounts/log?company_id={id}&limit=100
+Authorization: Bearer <token>
+```
+Respuesta 200: array de eventos ordenados por `created_at DESC`:
+```json
+[
+  {
+    "id": 1,
+    "event_type": "refresh_done",
+    "driver_id": null,
+    "session_id": "uuid-v4",
+    "history_id": null,
+    "payload": { "total_drivers": 312, "drivers_with_balance": 23 },
+    "created_at": "2026-05-12T18:00:00+00:00"
+  }
+]
+```
+
+---
+
+## Tarea 1 — `src/stores/toolsStore.js` (ampliar)
+
+Añadir al store existente (composition API, no reemplazar lo que hay):
+
+```js
+// State nuevo
+const historyLoading  = ref(false)
+const historySessions = ref([])          // lista de sesiones { session_id, fetched_at, ... }
+const historyDetail   = ref(null)        // { company, session_id, results[] }
+const historyError    = ref(null)
+
+const logLoading = ref(false)
+const logEntries = ref([])
+const logError   = ref(null)
+
+// Acción — cargar lista de sesiones
+async function loadHistorySessions(companyId) {
+  historyLoading.value  = true
+  historyError.value    = null
+  historySessions.value = []
+  historyDetail.value   = null
+  try {
+    const { data } = await apiClient.get('/tools/drivers/accounts/history', {
+      params: { company_id: companyId }
+    })
+    historySessions.value = data.sessions
+  } catch (err) {
+    historyError.value = { code: err.response?.status }
+  } finally {
+    historyLoading.value = false
+  }
+}
+
+// Acción — cargar detalle de una sesión
+async function loadHistoryDetail(companyId, sessionId) {
+  historyLoading.value = true
+  historyError.value   = null
+  historyDetail.value  = null
+  try {
+    const { data } = await apiClient.get(
+      `/tools/drivers/accounts/history/${sessionId}`,
+      { params: { company_id: companyId } }
+    )
+    historyDetail.value = data
+  } catch (err) {
+    historyError.value = { code: err.response?.status }
+  } finally {
+    historyLoading.value = false
+  }
+}
+
+// Acción — cargar log de auditoría
+async function loadPaymentLog(companyId) {
+  logLoading.value = true
+  logError.value   = null
+  try {
+    const { data } = await apiClient.get('/tools/drivers/accounts/log', {
+      params: { company_id: companyId, limit: 100 }
+    })
+    logEntries.value = data
+  } catch (err) {
+    logError.value = { code: err.response?.status }
+  } finally {
+    logLoading.value = false
+  }
+}
+
+function clearHistory() {
+  historyLoading.value  = false
+  historySessions.value = []
+  historyDetail.value   = null
+  historyError.value    = null
+  logEntries.value      = []
+  logError.value        = null
+}
+```
+
+Exportar los nuevos refs y funciones en el `return` del store.
+
+---
+
+## Tarea 2 — `DriversAccounts.vue` (mínimo cambio)
+
+Solo añadir la columna `payment_status` en la tabla existente.
+
+### En `headers`:
+```js
+{ title: 'Pago', key: 'payment_status', align: 'center', sortable: false },
+```
+Insertar después de la columna `Estado` (process_status).
+
+### Slot en la tabla:
+```vue
+<template #item.payment_status="{ item }">
+  <v-chip :color="paymentStatusColor(item.payment_status)" size="x-small" variant="tonal">
+    {{ paymentStatusLabel(item.payment_status) }}
+  </v-chip>
+</template>
+```
+
+### Helpers en `<script setup>`:
+```js
+const paymentStatusColor = (s) =>
+  ({ success: 'success', pending: 'warning', error: 'error' }[s] ?? 'secondary')
+
+const paymentStatusLabel = (s) =>
+  ({ success: 'Pagado', pending: 'Pendiente pago', error: 'Error pago' }[s] ?? '—')
+```
+
+---
+
+## Tarea 3 — Nueva vista `DriversAccountsHistory.vue`
+
+Ruta: `/tools/drivers-accounts/history`
+Archivo: `src/views/modules/DriversAccountsHistory.vue`
+
+### Layout general
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  ← Volver a Saldos          Histórico de Saldos                 │
+├─────────────────────────────────────────────────────────────────┤
+│  Compañía: [ Select ▼ ]                    [ Log de auditoría ] │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  [sin sesión seleccionada]                                      │
+│  ┌──────────────────────────────────────────────────────┐       │
+│  │ Fecha consulta │ Conductores │ Procesados │ Pagados  │       │
+│  │ 12 may 2026    │     23      │     21     │    0     │ [ver] │
+│  │ 10 may 2026    │     19      │     18     │   18     │ [ver] │
+│  └──────────────────────────────────────────────────────┘       │
+│                                                                 │
+│  [al hacer click en una sesión]                                 │
+│  ── Detalle sesión: 12 may 2026, 18:00 ───────────────────────  │
+│  Buscar: [___________]                    [ ⬇ Exportar CSV ]    │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │ Callsign │ Nombre │ Banco │ Cuenta │ Saldo │ Proceso │ Pago │ │
+│  └──────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Comportamiento
+
+- Al montar: cargar la lista de compañías activas (mismo call que en DriversAccounts.vue).
+- Al seleccionar compañía: llamar `tools.loadHistorySessions(companyId)`.
+- Mostrar tabla de sesiones. Al hacer clic en "Ver" o en cualquier fila:
+  llamar `tools.loadHistoryDetail(companyId, session_id)` y mostrar la tabla de detalle debajo.
+- Solo una sesión expandida a la vez.
+
+### Tabla de sesiones
+
+```vue
+<v-data-table
+  :headers="sessionHeaders"
+  :items="tools.historySessions"
+  density="compact"
+  items-per-page="10"
+  :loading="tools.historyLoading"
+>
+  <template #item.fetched_at="{ item }">
+    {{ formatDate(item.fetched_at) }}
+  </template>
+  <template #item.actions="{ item }">
+    <v-btn size="x-small" variant="tonal" @click="selectSession(item.session_id)">
+      Ver detalle
+    </v-btn>
+  </template>
+</v-data-table>
+```
+
+Headers de sesiones:
+| key                    | Header          | Align  |
+|------------------------|-----------------|--------|
+| `fetched_at`           | Fecha consulta  | left   |
+| `drivers_with_balance` | Conductores     | center |
+| `processed_count`      | Procesados      | center |
+| `paid_count`           | Pagados         | center |
+| `actions`              | —               | center |
+
+### Tabla de detalle de sesión
+
+Columnas:
+| key                      | Header           | Alineación | Notas                                       |
+|--------------------------|------------------|------------|---------------------------------------------|
+| `callsign`               | Callsign         | left       |                                             |
+| `forename` + `surname`   | Nombre           | left       | columna computada `fullName`                |
+| `bank_name`              | Banco            | left       |                                             |
+| `bank_sort_code`         | Cuenta / CLABE   | left       |                                             |
+| `account_type`           | Tipo             | center     | misma lógica TDD/CLABE/ERROR que en activos |
+| `current_balance`        | Saldo            | right      | mismos colores que en activos               |
+| `process_status`         | Proceso          | center     | chip done→verde, error→rojo, null→gris      |
+| `process_balance_before` | Saldo verificado | right      | formatMoney, null→ '—'                      |
+| `payment_status`         | Pago             | center     | chip: success→verde, pending→naranja, null→gris |
+| `webhook_status`         | Webhook          | center     | chip: "Liquidada"→verde, otro→naranja, null→gris |
+| `processed_at`           | Procesado        | left       | formatDate, null→ '—'                       |
+| `webhook_received_at`    | Confirmación     | left       | formatDate, null→ '—'                       |
+
+Buscador: filtra por nombre completo y `notes`.
+Reutilizar los mismos helpers de `DriversAccounts.vue`:
+`formatMoney`, `formatDate`, `accountType`, `accountTypeColor`, `statusColor`, `statusLabel`.
+
+### Exportar CSV de una sesión
+
+```js
+const exportHistoryCsv = () => {
+  const rows = filteredDetail.value
+  if (!rows.length) return
+  const cols = [
+    'callsign', 'driver_id', 'forename', 'surname',
+    'bank_name', 'bank_sort_code', 'account_type', 'current_balance',
+    'all_jobs_total', 'all_jobs_commission',
+    'process_status', 'process_balance_before', 'processed_at',
+    'payment_status', 'peibo_tracking_code', 'peibo_paid_at',
+    'webhook_status', 'webhook_transaction_id', 'webhook_date_time',
+    'webhook_amount', 'webhook_beneficiary_account',
+    'webhook_originator_name', 'webhook_received_at',
+    'notes'
+  ]
+  const csv = [
+    cols.join(','),
+    ...rows.map(r => {
+      const extra = { ...r, account_type: accountType(r.bank_sort_code) }
+      return cols.map(c => `"${String(extra[c] ?? '').replace(/"/g, '""')}"`).join(',')
+    })
+  ].join('\n')
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8;' }))
+  a.download = `historico_${tools.historyDetail?.company?.name}_${selectedSession.value}_${Date.now()}.csv`
+  a.click()
+}
+```
+
+### Drawer — Log de auditoría
+
+Botón "Log de auditoría" abre un `v-navigation-drawer` temporal por la derecha.
+Al abrirlo: llamar `tools.loadPaymentLog(selectedCompanyId.value)`.
+
+```vue
+<v-navigation-drawer v-model="logDrawer" location="right" width="480" temporary>
+  <v-toolbar density="compact" color="surface">
+    <v-toolbar-title class="text-body-1 font-weight-bold">Log de auditoría</v-toolbar-title>
+    <v-btn icon="mdi-close" @click="logDrawer = false" />
+  </v-toolbar>
+  <v-list density="compact" lines="two">
+    <v-list-item
+      v-for="entry in tools.logEntries"
+      :key="entry.id"
+      :subtitle="formatDate(entry.created_at)"
+    >
+      <template #title>
+        <v-chip :color="logColor(entry.event_type)" size="x-small" class="mr-2">
+          {{ entry.event_type }}
+        </v-chip>
+        <span v-if="entry.driver_id" class="text-caption text-medium-emphasis">
+          driver #{{ entry.driver_id }}
+        </span>
+      </template>
+      <template #append>
+        <v-tooltip v-if="entry.payload" location="left">
+          <template #activator="{ props }">
+            <v-icon v-bind="props" size="small">mdi-information-outline</v-icon>
+          </template>
+          <pre class="text-caption" style="max-width:300px;white-space:pre-wrap;">{{ JSON.stringify(entry.payload, null, 2) }}</pre>
+        </v-tooltip>
+      </template>
+    </v-list-item>
+  </v-list>
+</v-navigation-drawer>
+```
+
+Helper de color para event_type:
+```js
+const logColor = (type) => ({
+  refresh_start:       'primary',
+  refresh_done:        'success',
+  process_done:        'success',
+  process_error:       'error',
+  payment_initiated:   'warning',
+  payment_error:       'error',
+  webhook_received:    'info',
+  webhook_error:       'error',
+}[type] ?? 'secondary')
+```
+
+---
+
+## Tarea 4 — Router `src/router/modules/modules.js`
+
+Añadir la nueva ruta después de `drivers-accounts`:
+
+```js
+{
+  path: '/tools/drivers-accounts/history',
+  name: 'drivers-accounts-history',
+  component: () => import('@/views/modules/DriversAccountsHistory.vue'),
+  meta: { requiresAuth: true, title: 'Histórico de Saldos', requiredPermission: 'tools:run' }
+},
+```
+
+---
+
+## Tarea 5 — Sidebar / `Tools.vue`
+
+En la vista `/tools` (menú de herramientas), añadir el acceso al histórico junto al
+enlace de Saldos de Conductores. Seguir el mismo patrón visual que los otros ítems.
+
+```vue
+<v-list-item
+  to="/tools/drivers-accounts/history"
+  prepend-icon="mdi-history"
+  title="Histórico de Saldos"
+/>
+```
+
+---
+
+## Notas
+
+- `formatDate`, `formatMoney`, `accountType`, `accountTypeColor` ya están implementadas
+  en `DriversAccounts.vue` — copiarlas/importarlas para no duplicar lógica.
+- El detalle de sesión es de solo lectura — sin botones de procesar ni de refresh.
+- La columna `webhook_status` solo tiene sentido cuando Peibo esté activo, pero mostrarla
+  ya (en gris/vacía) para que el frontend esté listo cuando lleguen los datos.
+- El log drawer NO requiere compañía seleccionada para abrirse, pero sí para cargar datos.
+- Los chips de `payment_status` y `webhook_status` en el histórico usan los mismos helpers
+  `paymentStatusColor`/`paymentStatusLabel` que se añaden en `DriversAccounts.vue`.

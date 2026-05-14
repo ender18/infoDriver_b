@@ -1,0 +1,512 @@
+# PROMPT: Histórico de Saldos + Pagos Peibo — FastAPI + Vue 3 + Vuetify 3
+
+## Estado actual (lo que ya funciona — NO romper)
+
+- `driver_accounts` es una tabla de trabajo temporal por compañía.
+  Cada vez que el usuario pulsa "Consultar saldos", se borra y se reemplaza
+  con los datos frescos de Azure. Los campos de procesamiento (`process_status`,
+  `process_balance_before`, etc.) se pierden al siguiente refresh.
+- El módulo de frontend (`ToolsView.vue`, pestaña "Saldos con deuda") ya funciona
+  con SSE para refresh y loop individual/masivo para procesar.
+- Todo lo demás (validación de conductores, estadísticas) no se toca.
+
+## Objetivo
+
+1. **Histórico permanente** — crear `driver_accounts_history` para que cada sesión
+   de consulta/procesamiento quede guardada para siempre.
+2. **Campos de pago Peibo** — preparar el esquema para cuando se integre la plataforma
+   de pagos (por ahora solo guardar la estructura, sin lógica de pago).
+3. **Webhook Peibo** — endpoint para recibir la confirmación de pago que manda Peibo
+   y guardarla en el histórico y en el log.
+4. **Log de auditoría** — tabla `payment_log` que registra cada evento transaccional
+   (refresh, proceso, pago iniciado, webhook recibido, error).
+
+---
+
+## Fase 1 — Base de datos
+
+### Migración A — añadir campos Peibo + webhook a `driver_accounts` (tabla de trabajo)
+
+El webhook de Peibo se guarda en AMBAS tablas (temporal e histórica) — por eso
+`driver_accounts` también necesita todos los campos `webhook_*`.
+
+```python
+# alembic: add_peibo_and_webhook_fields_to_driver_accounts
+
+# — Pago Peibo (respuesta de la API al iniciar el pago) —
+op.add_column('driver_accounts', sa.Column('payment_status',        sa.String(20),  nullable=True))  # null | 'pending' | 'success' | 'error'
+op.add_column('driver_accounts', sa.Column('peibo_transaction_id',  sa.String(100), nullable=True))
+op.add_column('driver_accounts', sa.Column('peibo_tracking_code',   sa.String(100), nullable=True))
+op.add_column('driver_accounts', sa.Column('peibo_paid_at',         sa.DateTime(timezone=True), nullable=True))
+
+# — Webhook Peibo (confirmación de liquidación) —
+op.add_column('driver_accounts', sa.Column('webhook_status',              sa.String(50),     nullable=True))
+op.add_column('driver_accounts', sa.Column('webhook_transaction_id',      sa.String(100),    nullable=True))
+op.add_column('driver_accounts', sa.Column('webhook_date_time',           sa.DateTime(timezone=True), nullable=True))
+op.add_column('driver_accounts', sa.Column('webhook_concept',             sa.String(255),    nullable=True))
+op.add_column('driver_accounts', sa.Column('webhook_reference',           sa.String(100),    nullable=True))
+op.add_column('driver_accounts', sa.Column('webhook_amount',              sa.Numeric(12, 2), nullable=True))
+op.add_column('driver_accounts', sa.Column('webhook_beneficiary_account', sa.String(30),     nullable=True))
+op.add_column('driver_accounts', sa.Column('webhook_originator_account',  sa.String(30),     nullable=True))
+op.add_column('driver_accounts', sa.Column('webhook_originator_bank',     sa.String(10),     nullable=True))
+op.add_column('driver_accounts', sa.Column('webhook_originator_name',     sa.String(200),    nullable=True))
+op.add_column('driver_accounts', sa.Column('webhook_originator_tax_id',   sa.String(20),     nullable=True))
+op.add_column('driver_accounts', sa.Column('webhook_type',                sa.String(20),     nullable=True))
+op.add_column('driver_accounts', sa.Column('webhook_refund_reason_code',  sa.Integer(),      nullable=True))
+op.add_column('driver_accounts', sa.Column('webhook_received_at',         sa.DateTime(timezone=True), nullable=True))
+```
+
+### Migración B — crear `driver_accounts_history`
+
+Columnas = todo lo de `driver_accounts` + campos de sesión + campos del webhook de Peibo.
+NO es un soft-delete de `driver_accounts` — es una copia inmutable de cada sesión.
+
+```python
+op.create_table(
+    'driver_accounts_history',
+
+    # — Clave propia —
+    sa.Column('id',                       sa.Integer(), primary_key=True),
+
+    # — Agrupación por sesión —
+    sa.Column('session_id',               sa.String(36),  nullable=False),   # UUID v4, igual para todos los registros de un mismo refresh
+    sa.Column('company_id',               sa.Integer(),   sa.ForeignKey('companies.id'), nullable=False),
+
+    # — Datos del conductor (copia del momento del refresh) —
+    sa.Column('driver_id',                sa.Integer(),  nullable=False),
+    sa.Column('callsign',                 sa.String(50), nullable=True),
+    sa.Column('forename',                 sa.String(100), nullable=True),
+    sa.Column('surname',                  sa.String(100), nullable=True),
+    sa.Column('bank_name',                sa.String(150), nullable=True),
+    sa.Column('bank_sort_code',           sa.String(100), nullable=True),
+    sa.Column('current_balance',          sa.Float(), nullable=True),
+    sa.Column('outstanding_amount',       sa.Float(), nullable=True),
+    sa.Column('all_jobs_total',           sa.Float(), nullable=True),
+    sa.Column('all_jobs_commission',      sa.Float(), nullable=True),
+    sa.Column('notes',                    sa.Text(),  nullable=True),
+    sa.Column('fetched_at',               sa.DateTime(timezone=True), nullable=True),
+
+    # — Resultado del procesamiento Autocab —
+    sa.Column('process_status',           sa.String(20),  nullable=True),   # null | 'done' | 'error'
+    sa.Column('process_result',           sa.Text(),      nullable=True),
+    sa.Column('process_balance_before',   sa.Float(),     nullable=True),   # saldo re-verificado antes de procesar
+    sa.Column('processed_at',             sa.DateTime(timezone=True), nullable=True),
+
+    # — Pago Peibo (respuesta al llamar la API de pago) —
+    sa.Column('payment_status',           sa.String(20),  nullable=True),   # null | 'pending' | 'success' | 'error'
+    sa.Column('peibo_transaction_id',     sa.String(100), nullable=True),
+    sa.Column('peibo_tracking_code',      sa.String(100), nullable=True),
+    sa.Column('peibo_paid_at',            sa.DateTime(timezone=True), nullable=True),
+
+    # — Webhook de Peibo (confirmación de liquidación) —
+    sa.Column('webhook_status',           sa.String(50),  nullable=True),   # e.g. "Liquidada"
+    sa.Column('webhook_date_time',        sa.DateTime(timezone=True), nullable=True),
+    sa.Column('webhook_concept',          sa.String(255), nullable=True),
+    sa.Column('webhook_reference',        sa.String(100), nullable=True),
+    sa.Column('webhook_amount',           sa.Numeric(12, 2), nullable=True),
+    sa.Column('webhook_beneficiary_account', sa.String(30), nullable=True),
+    sa.Column('webhook_originator_account',  sa.String(30), nullable=True),
+    sa.Column('webhook_originator_bank',     sa.String(10), nullable=True),
+    sa.Column('webhook_originator_name',     sa.String(200), nullable=True),
+    sa.Column('webhook_originator_tax_id',   sa.String(20),  nullable=True),
+    sa.Column('webhook_type',                sa.String(20),  nullable=True),   # e.g. "outgoing"
+    sa.Column('webhook_refund_reason_code',  sa.Integer(),   nullable=True),
+    sa.Column('webhook_received_at',         sa.DateTime(timezone=True), nullable=True),
+)
+op.create_index('ix_dah_session_id',   'driver_accounts_history', ['session_id'])
+op.create_index('ix_dah_company_id',   'driver_accounts_history', ['company_id'])
+op.create_index('ix_dah_driver_id',    'driver_accounts_history', ['driver_id'])
+op.create_index('ix_dah_tracking_code','driver_accounts_history', ['peibo_tracking_code'])
+```
+
+### Migración C — crear `payment_log`
+
+```python
+op.create_table(
+    'payment_log',
+    sa.Column('id',          sa.Integer(), primary_key=True),
+    sa.Column('event_type',  sa.String(50), nullable=False),
+    # Valores posibles: 'refresh_start' | 'refresh_done' | 'process_done' | 'process_error'
+    #                   | 'payment_initiated' | 'payment_error'
+    #                   | 'webhook_received' | 'webhook_error'
+    sa.Column('company_id',  sa.Integer(), sa.ForeignKey('companies.id'), nullable=True),
+    sa.Column('driver_id',   sa.Integer(), nullable=True),
+    sa.Column('session_id',  sa.String(36), nullable=True),  # agrupa eventos de un mismo refresh
+    sa.Column('history_id',  sa.Integer(), sa.ForeignKey('driver_accounts_history.id'), nullable=True),
+    sa.Column('payload',     sa.JSON(), nullable=True),       # copia completa del request/response/webhook
+    sa.Column('created_at',  sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
+)
+op.create_index('ix_payment_log_company_id',  'payment_log', ['company_id'])
+op.create_index('ix_payment_log_driver_id',   'payment_log', ['driver_id'])
+op.create_index('ix_payment_log_session_id',  'payment_log', ['session_id'])
+op.create_index('ix_payment_log_event_type',  'payment_log', ['event_type'])
+op.create_index('ix_payment_log_created_at',  'payment_log', ['created_at'])
+```
+
+---
+
+## Fase 2 — Modelos SQLAlchemy
+
+### `app/models/driver_account_history.py` (nuevo)
+
+Espejo exacto de los campos de la migración B.
+Relación: `company = relationship("Company")`.
+No tiene relación FK directa con `driver_accounts` — son copias independientes.
+
+### `app/models/payment_log.py` (nuevo)
+
+Espejo de migración C.
+Relación: `history = relationship("DriverAccountHistory")`.
+
+### `app/models/driver_account.py` (ampliar)
+
+Añadir todos los campos de la migración A: los 4 de Peibo más los 14 del webhook.
+`peibo_tracking_code` es el índice clave — añadir `index=True` en el modelo.
+
+---
+
+## Fase 3 — Backend: cambios en `app/routers/tools.py`
+
+### Helper de log
+
+```python
+def _log(db, event_type, company_id=None, driver_id=None, session_id=None, history_id=None, payload=None):
+    entry = PaymentLog(
+        event_type=event_type,
+        company_id=company_id,
+        driver_id=driver_id,
+        session_id=session_id,
+        history_id=history_id,
+        payload=payload,
+    )
+    db.add(entry)
+    db.commit()
+```
+
+### Cambio en `refresh_driver_accounts` (SSE)
+
+Al inicio del refresh, generar un `session_id = str(uuid.uuid4())`.
+
+#### REGLA CRÍTICA — Todo o nada
+
+El paso de "copiar al histórico + borrar driver_accounts" es una operación atómica.
+Si falla cualquier parte, se hace rollback completo y se emite SSE de error.
+**Nunca borrar `driver_accounts` sin haber confirmado la copia al histórico.**
+
+```python
+# ANTES de borrar — copiar al histórico en una sola transacción atómica
+existing = db.query(DriverAccount).filter(DriverAccount.company_id == company_id).all()
+
+if existing:
+    try:
+        for row in existing:
+            db.add(DriverAccountHistory(
+                session_id                  = row.fetched_at.isoformat() if row.fetched_at else "legacy",
+                company_id                  = row.company_id,
+                driver_id                   = row.driver_id,
+                callsign                    = row.callsign,
+                forename                    = row.forename,
+                surname                     = row.surname,
+                bank_name                   = row.bank_name,
+                bank_sort_code              = row.bank_sort_code,
+                current_balance             = row.current_balance,
+                outstanding_amount          = row.outstanding_amount,
+                all_jobs_total              = row.all_jobs_total,
+                all_jobs_commission         = row.all_jobs_commission,
+                notes                       = row.notes,
+                fetched_at                  = row.fetched_at,
+                process_status              = row.process_status,
+                process_result              = row.process_result,
+                process_balance_before      = row.process_balance_before,
+                processed_at                = row.processed_at,
+                payment_status              = row.payment_status,
+                peibo_transaction_id        = row.peibo_transaction_id,
+                peibo_tracking_code         = row.peibo_tracking_code,
+                peibo_paid_at               = row.peibo_paid_at,
+                webhook_status              = row.webhook_status,
+                webhook_transaction_id      = row.webhook_transaction_id,
+                webhook_date_time           = row.webhook_date_time,
+                webhook_concept             = row.webhook_concept,
+                webhook_reference           = row.webhook_reference,
+                webhook_amount              = row.webhook_amount,
+                webhook_beneficiary_account = row.webhook_beneficiary_account,
+                webhook_originator_account  = row.webhook_originator_account,
+                webhook_originator_bank     = row.webhook_originator_bank,
+                webhook_originator_name     = row.webhook_originator_name,
+                webhook_originator_tax_id   = row.webhook_originator_tax_id,
+                webhook_type                = row.webhook_type,
+                webhook_refund_reason_code  = row.webhook_refund_reason_code,
+                webhook_received_at         = row.webhook_received_at,
+            ))
+
+        # DELETE dentro de la misma transacción — solo se ejecuta si los inserts no fallan
+        db.query(DriverAccount).filter(DriverAccount.company_id == company_id).delete()
+        db.commit()   # ← UN SOLO commit cubre inserts en history + delete en driver_accounts
+
+    except Exception as e:
+        db.rollback()   # ← si algo falla, no se borra nada ni se guarda nada
+        yield _sse({"type": "error", "code": 500,
+                    "detail": f"Error al respaldar sesión anterior: {str(e)}"})
+        return
+```
+
+Emitir log al iniciar:
+```python
+_log(db, 'refresh_start', company_id=company_id, session_id=new_session_id)
+```
+
+Al terminar (evento `done`):
+```python
+_log(db, 'refresh_done', company_id=company_id, session_id=new_session_id,
+     payload={"total_drivers": total, "drivers_with_balance": saved_count})
+```
+
+### Cambio en `process_single_driver`
+
+Después de guardar en `driver_accounts`, buscar el registro equivalente en
+`driver_accounts_history` (mismo `company_id` + `driver_id` con el `session_id`
+más reciente) y actualizarlo también:
+
+```python
+# Buscar registro en histórico más reciente para este driver
+hist_row = (
+    db.query(DriverAccountHistory)
+    .filter(
+        DriverAccountHistory.company_id == company_id,
+        DriverAccountHistory.driver_id  == driver_id,
+    )
+    .order_by(DriverAccountHistory.fetched_at.desc())
+    .first()
+)
+if hist_row:
+    hist_row.process_status          = proc_status
+    hist_row.process_result          = proc_result
+    hist_row.process_balance_before  = balance_before
+    hist_row.processed_at            = row.processed_at
+    db.commit()
+
+# Log de auditoría
+_log(db, f'process_{proc_status}',
+     company_id=company_id, driver_id=driver_id,
+     history_id=hist_row.id if hist_row else None,
+     payload={"balance_before": balance_before, "result": proc_result[:500]})
+```
+
+---
+
+## Fase 4 — Webhook Peibo
+
+### Nuevo router `app/routers/webhooks.py`
+
+```python
+POST /webhooks/peibo
+Content-Type: application/json
+```
+
+**Payload que envía Peibo:**
+```json
+{
+  "transaction_id":       "PRfzTT1I1sE9lc87z77i",
+  "tracking_code":        "PEIBO0000275001",
+  "date_time":            "2026-05-12T10:36:00Z",
+  "concept":              "Test Prueba Webservices",
+  "reference":            "123457",
+  "amount":               "10.00",
+  "beneficiary_account":  "012180015760711095",
+  "originator_account":   "732010100003232949",
+  "originator_bank":      "90732",
+  "originator_name":      "TACK SA DE CV",
+  "originator_tax_id":    "XXX000000MN1",
+  "type":                 "outgoing",
+  "status":               "Liquidada",
+  "refund_reason_code":   0
+}
+```
+
+**Identificador:** el campo `tracking_code` es la clave que vincula el webhook con el
+registro en BD. Se guarda en `peibo_tracking_code` al momento de iniciar el pago,
+y el webhook llega con ese mismo valor para identificar a qué conductor corresponde.
+
+**Lógica del endpoint:**
+
+1. Extraer `tracking_code` del payload.
+2. Buscar en **ambas tablas** por `peibo_tracking_code == tracking_code`:
+   - En `driver_accounts` (sesión activa, puede o no existir aún)
+   - En `driver_accounts_history` (sesión archivada, la más reciente para ese tracking_code)
+3. Si no se encuentra en ninguna: log `webhook_error` y responder 200.
+4. Guardar **todos** los campos del webhook en los registros encontrados (ambas tablas).
+5. Si `status == "Liquidada"`, actualizar también `payment_status = 'success'` en ambas.
+6. Log `webhook_received` con el payload completo.
+7. Responder `{"ok": true}`.
+
+```python
+def _apply_webhook_fields(row, payload: dict):
+    """Aplica todos los campos del webhook a un registro (driver_accounts o history)."""
+    row.webhook_status              = payload.get("status")
+    row.webhook_transaction_id      = payload.get("transaction_id")
+    row.webhook_date_time           = payload.get("date_time")
+    row.webhook_concept             = payload.get("concept")
+    row.webhook_reference           = payload.get("reference")
+    row.webhook_amount              = float(payload.get("amount", 0) or 0)
+    row.webhook_beneficiary_account = payload.get("beneficiary_account")
+    row.webhook_originator_account  = payload.get("originator_account")
+    row.webhook_originator_bank     = payload.get("originator_bank")
+    row.webhook_originator_name     = payload.get("originator_name")
+    row.webhook_originator_tax_id   = payload.get("originator_tax_id")
+    row.webhook_type                = payload.get("type")
+    row.webhook_refund_reason_code  = payload.get("refund_reason_code")
+    row.webhook_received_at         = datetime.now(timezone.utc)
+    if payload.get("status") == "Liquidada":
+        row.payment_status = "success"
+
+
+@router.post("/webhooks/peibo")
+def peibo_webhook(payload: dict, db: Session = Depends(get_db)):
+    tracking_code = payload.get("tracking_code")
+
+    # Buscar en tabla de trabajo (sesión activa)
+    work_row = (
+        db.query(DriverAccount)
+        .filter(DriverAccount.peibo_tracking_code == tracking_code)
+        .first()
+    )
+
+    # Buscar en histórico (sesión archivada)
+    hist_row = (
+        db.query(DriverAccountHistory)
+        .filter(DriverAccountHistory.peibo_tracking_code == tracking_code)
+        .order_by(DriverAccountHistory.fetched_at.desc())
+        .first()
+    )
+
+    if not work_row and not hist_row:
+        _log(db, 'webhook_error', payload={"reason": "tracking_code not found", **payload})
+        return {"ok": True}
+
+    # Aplicar todos los campos a los registros encontrados
+    if work_row:
+        _apply_webhook_fields(work_row, payload)
+    if hist_row:
+        _apply_webhook_fields(hist_row, payload)
+
+    db.commit()   # un solo commit para ambas tablas
+
+    _log(db, 'webhook_received',
+         company_id=(hist_row or work_row).company_id,
+         driver_id=(hist_row or work_row).driver_id,
+         history_id=hist_row.id if hist_row else None,
+         payload=payload)
+
+    return {"ok": True}
+```
+
+**Nota de seguridad:** Peibo debe verificarse con un secret / firma HMAC en el header.
+Por ahora aceptar cualquier request (red interna), pero documentar para implementar
+la verificación cuando Peibo la habilite.
+
+---
+
+## Fase 5 — Nuevos endpoints de consulta
+
+### Listar sesiones históricas de una compañía
+
+```
+GET /tools/drivers/accounts/history?company_id={id}
+```
+
+Devuelve los `session_id` únicos con resumen:
+```json
+[
+  {
+    "session_id":          "2026-04-29T18:00:00+00:00",
+    "fetched_at":          "2026-04-29T18:00:00+00:00",
+    "drivers_with_balance": 23,
+    "processed_count":     21,
+    "paid_count":          18
+  }
+]
+```
+
+### Detalle de una sesión histórica
+
+```
+GET /tools/drivers/accounts/history/{session_id}?company_id={id}
+```
+
+Devuelve todos los registros de esa sesión (mismo formato que `_row_to_dict`
+pero con campos adicionales de Peibo y webhook).
+
+### Log de auditoría de una compañía
+
+```
+GET /tools/drivers/accounts/log?company_id={id}&limit=100
+```
+
+Devuelve los últimos N eventos del `payment_log` para esa compañía,
+ordenados por `created_at DESC`.
+
+---
+
+## Fase 6 — Frontend (cambios mínimos en `ToolsView.vue`)
+
+### Pestaña "Saldos con deuda" — añadir
+
+#### Columnas extra en la tabla (ya en la sesión activa)
+
+| key                    | Header          | Notas                                    |
+|------------------------|-----------------|------------------------------------------|
+| `payment_status`       | Pago            | chip: null→gris, pending→naranja, success→verde, error→rojo |
+
+#### Nueva pestaña "Histórico" (dentro de /tools)
+
+- Select de compañía (comparte el mismo que las otras pestañas).
+- Al seleccionar compañía: cargar lista de sesiones `GET /history?company_id={id}`.
+- Mostrar tabla de sesiones con columnas: Fecha consulta · Conductores · Procesados · Pagados.
+- Al hacer clic en una fila: expandir (o navegar) para ver el detalle de esa sesión
+  con la misma tabla de conductores pero con columnas adicionales de Peibo y webhook.
+- Botón "Exportar CSV" por sesión, incluyendo todos los campos (igual que en saldos activos).
+
+---
+
+## Resumen de archivos nuevos/modificados
+
+### Backend
+| Archivo | Acción |
+|---------|--------|
+| `alembic/versions/xxx_add_peibo_fields.py`         | nueva migración A |
+| `alembic/versions/xxx_create_history_log.py`       | nuevas migraciones B y C (una o dos) |
+| `app/models/driver_account.py`                     | añadir 4 campos Peibo |
+| `app/models/driver_account_history.py`             | nuevo modelo |
+| `app/models/payment_log.py`                        | nuevo modelo |
+| `app/routers/tools.py`                             | modificar refresh y process, añadir endpoints de histórico |
+| `app/routers/webhooks.py`                          | nuevo router |
+| `main.py`                                          | registrar `webhooks.router` |
+
+### Frontend
+| Archivo | Acción |
+|---------|--------|
+| `src/api/tools.js`                                 | añadir `getHistorySessions`, `getHistoryDetail`, `getPaymentLog` |
+| `src/stores/toolsStore.js`                         | añadir state/actions para histórico |
+| `src/views/tools/ToolsView.vue`                    | añadir columna `payment_status` y pestaña Histórico |
+
+---
+
+## Notas importantes
+
+- **Nunca modificar el histórico** — los registros de `driver_accounts_history` solo se
+  crean y actualizan, nunca se borran. El webhook puede actualizar campos `webhook_*` después.
+- **Todo o nada en el refresh** — el bloque copiar-al-histórico + borrar-driver_accounts
+  es una sola transacción. Si falla el insert en history, no se ejecuta el delete.
+  Así se garantiza que nunca se pierda la sesión anterior por un error de BD.
+- **El webhook actualiza AMBAS tablas** — `driver_accounts` y `driver_accounts_history`
+  se actualizan en el mismo commit usando `peibo_tracking_code` como identificador.
+  Si el registro ya pasó al histórico (nuevo refresh corrió antes de que llegara el webhook),
+  igualmente se actualiza el histórico. Si aún está en la tabla de trabajo, también.
+- **Peibo no está integrado aún** — los campos de pago se guardan en el esquema pero
+  el endpoint de pago (`POST /tools/drivers/accounts/pay/{driver_id}`) se implementa
+  en una fase posterior cuando se defina la API de Peibo.
+- **El webhook siempre responde 200** — Peibo no reintenta si recibe error. Cualquier
+  fallo de procesamiento se registra en `payment_log` pero la respuesta HTTP es siempre `{"ok": true}`.
+- **El `session_id` del histórico** antes de esta migración se genera como
+  `fetched_at.isoformat()` del registro existente (migración no destructiva).
+- **El `payment_log` es append-only** — nunca se modifica ni borra. Es el trail de auditoría.

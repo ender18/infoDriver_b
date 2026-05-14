@@ -6,6 +6,8 @@ from app.models.user_role import user_roles
 from app.models.role_permission import role_permissions
 from app.models.company import Company
 from app.models.driver_account import DriverAccount
+from app.models.driver_account_history import DriverAccountHistory
+from app.models.payment_log import PaymentLog
 
 __all__ = [
     "Base",
@@ -16,4 +18,6 @@ __all__ = [
     "role_permissions",
     "Company",
     "DriverAccount",
+    "DriverAccountHistory",
+    "PaymentLog",
 ]

@@ -1,0 +1,185 @@
+# MÓDULO: Saldos y Procesamiento de Conductores — Azure API Management
+
+## Descripción general
+
+Este módulo integra con la API de Autocab expuesta a través de **Azure API Management**.
+Consulta saldos pendientes de los conductores de una compañía y ejecuta el proceso
+contable `ProcessDriverAccount` por cada uno.
+
+El backend (FastAPI) actúa como proxy — el frontend nunca llama a Azure directamente.
+Los datos se persisten en BD local para evitar llamadas repetidas a la API externa.
+
+---
+
+## API externa — Azure API Management
+
+**Base URL:** `https://autocab-api.azure-api.net`
+
+**Autenticación:** header `Ocp-Apim-Subscription-Key: <clave>` en cada request.
+La clave se guarda por compañía en la tabla `companies.api_subscription_key`.
+
+---
+
+## Endpoints Azure usados por el backend
+
+### 1. Listar conductores
+
+```
+GET https://autocab-api.azure-api.net/driver/v1/drivers
+Ocp-Apim-Subscription-Key: <clave>
+```
+
+Devuelve la lista completa de conductores de la compañía.
+Campos relevantes: `id`, `callsign`, `bankName`, `bankSortCode`.
+Se usa para cruzar datos de banco con los saldos (que vienen de otra API).
+
+---
+
+### 2. Listar autorizaciones de conductores
+
+```
+GET https://autocab-api.azure-api.net/driver/v1/driverauthorisations
+Ocp-Apim-Subscription-Key: <clave>
+```
+
+Devuelve autorizaciones registradas. Se usa en el validador de conductores
+para detectar quiénes no tienen autorización activa.
+
+---
+
+### 3. Consultar saldos — paginado
+
+```
+POST https://autocab-api.azure-api.net/accounts/v1/DriversAccounts
+     ?pageno={n}&pagesize=50
+Ocp-Apim-Subscription-Key: <clave>
+Content-Type: application/json
+
+{
+  "companyId": null,
+  "driverId":  null          // o un int para consultar un conductor específico
+}
+```
+
+**Respuesta:**
+```json
+{
+  "totalSummariesCount": 312,
+  "summaries": [
+    {
+      "driverId":          1464,
+      "forename":          "Rodrigo",
+      "surname":           "Gonzalez",
+      "currentBalance":    150.50,
+      "outstandingAmount": 0.0,
+      "allJobsTotal":      980.00,
+      "allJobsCommission": 98.00,
+      "notes":             ""
+    }
+  ]
+}
+```
+
+- `totalSummariesCount` permite calcular el número de páginas: `ceil(total / 50)`.
+- El backend filtra solo los registros con `currentBalance > 0` antes de guardar en BD.
+- `bankName` y `bankSortCode` **no vienen** en este endpoint — se cruzan con `/drivers`.
+
+---
+
+### 4. Procesar conductor — `ProcessDriverAccount`
+
+```
+POST https://autocab-api.azure-api.net/accounts/v1/ProcessDriverAccount/{driverId}
+Ocp-Apim-Subscription-Key: <clave>
+Content-Type: application/json
+
+{
+  "amount":             0,
+  "issueDate":          "2026-04-29T18:05:00.000Z",   // UTC, formato ISO
+  "loadPrepaidCard":    false,
+  "processDocketsOnly": false,
+  "sendAsEmail":        false,
+  "walletPayOut":       false
+}
+```
+
+- `issueDate` se genera en el momento del request (`datetime.now(UTC)`).
+- Los otros campos se envían siempre con estos valores fijos.
+- La respuesta es texto plano (`"OK"`) si el proceso fue exitoso.
+- Un HTTP 4xx/5xx indica error; el cuerpo contiene el detalle.
+
+---
+
+## Flujo completo del módulo
+
+```
+1. Usuario selecciona compañía en la UI
+        ↓
+2. Frontend llama  GET /tools/drivers/accounts?company_id={id}
+   Backend devuelve los registros guardados en BD (respuesta inmediata)
+        ↓
+3. Usuario pulsa "Consultar saldos"
+   Frontend abre SSE:  GET /tools/drivers/accounts/refresh?company_id={id}
+   Backend:
+     a. GET /driver/v1/drivers       → mapa driverId → {callsign, bankName, bankSortCode}
+     b. POST /accounts/v1/DriversAccounts?pageno=1&pagesize=50  → total y primera página
+     c. Borra registros anteriores de esa compañía en BD
+     d. Emite SSE { type: "init", total, total_pages, company }
+     e. Por cada página (50 conductores):
+           - Filtra currentBalance > 0
+           - Cruza con mapa de conductores para añadir datos bancarios
+           - Guarda en tabla driver_accounts (BD local)
+           - Emite SSE { type: "page", page, total_pages, new_results[] }
+     f. Emite SSE { type: "done", total_drivers }
+        ↓
+4. Usuario pulsa "Procesar todos" (o botón individual por fila)
+   Frontend llama  POST /tools/drivers/accounts/process/{driverId}?company_id={id}
+   Backend por cada conductor:
+     a. POST /DriversAccounts?pageno=1 con driverId específico → re-verifica saldo actual
+        Si el saldo cambió → actualiza driver_accounts en BD
+     b. POST /ProcessDriverAccount/{driverId}  → ejecuta proceso contable en Azure
+     c. Guarda en BD: process_status, process_result, process_balance_before, processed_at
+     d. Responde al frontend con el resultado
+```
+
+---
+
+## Tabla BD — `driver_accounts`
+
+| Columna                  | Tipo     | Descripción                                    |
+|--------------------------|----------|------------------------------------------------|
+| `id`                     | int PK   |                                                |
+| `company_id`             | int FK   | referencia a `companies.id`                    |
+| `driver_id`              | int      | ID del conductor en Autocab                    |
+| `callsign`               | str      | cruzado desde `/driver/v1/drivers`             |
+| `forename`               | str      | de `/accounts/v1/DriversAccounts`              |
+| `surname`                | str      |                                                |
+| `bank_name`              | str      | cruzado desde `/driver/v1/drivers`             |
+| `bank_sort_code`         | str      | 16 chars = TDD, 18 chars = CLABE, otro = ERROR |
+| `current_balance`        | float    | saldo pendiente (solo > 0 se guarda)           |
+| `outstanding_amount`     | float    |                                                |
+| `all_jobs_total`         | float    | total facturado de viajes                      |
+| `all_jobs_commission`    | float    | comisión sobre viajes                          |
+| `notes`                  | text     |                                                |
+| `fetched_at`             | datetime | cuándo se consultó desde Azure                 |
+| `process_status`         | str      | null / "done" / "error"                        |
+| `process_result`         | text     | respuesta de ProcessDriverAccount o detalle err|
+| `process_balance_before` | float    | saldo re-verificado justo antes de procesar    |
+| `processed_at`           | datetime | cuándo se ejecutó ProcessDriverAccount         |
+
+---
+
+## Notas importantes
+
+- **Reemplaza, no acumula:** cada "Consultar saldos" borra todos los registros de esa
+  compañía en BD antes de guardar los nuevos.
+- **Re-verificación de saldo:** antes de procesar, el backend hace una llamada individual
+  a `DriversAccounts` con `driverId` para confirmar que el saldo no cambió desde el refresh.
+  Si cambió, actualiza BD y procesa con el saldo actual.
+- **Proceso masivo = loop frontend:** no hay endpoint bulk. El frontend llama a
+  `/process/{driverId}` en secuencia (uno a uno) y acumula progreso localmente.
+- **Campos fijos en ProcessDriverAccount:** `amount=0`, `loadPrepaidCard=false`,
+  `processDocketsOnly=false`, `sendAsEmail=false`, `walletPayOut=false`.
+  El único campo dinámico es `issueDate` (timestamp del momento del request).
+- **Errores tolerados:** si la re-verificación de saldo falla, el proceso continúa
+  con el saldo guardado en BD (no es bloqueante).
