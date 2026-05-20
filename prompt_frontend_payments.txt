@@ -1,0 +1,151 @@
+# PROMPT: Módulo Prueba de Transferencia SPEI — Frontend Vue 3 + Vuetify 3
+
+## Contexto
+
+Frontend: `/home/ender/Projects/infoDriver_f`
+Módulo de configuración para probar pagos individuales vía Peibo antes de integrarlos
+al módulo masivo de saldos de conductores.
+
+Archivos creados/modificados:
+
+| Archivo | Acción |
+|---------|--------|
+| `src/views/modules/PaymentTest.vue`  | CREAR — vista de prueba individual |
+| `src/router/modules/modules.js`      | MODIFICAR — añadir ruta            |
+| `src/views/modules/Settings.vue`     | MODIFICAR — añadir card            |
+
+---
+
+## Endpoint backend
+
+```
+POST /api/payments/transfer
+```
+
+### Body
+```json
+{
+  "company_id":               1,
+  "concept":                  "Pago de saldo",
+  "reference":                "123457",
+  "amount":                   "10.00",
+  "beneficiary_account":      "012180015760711095",
+  "beneficiary_name":         "CARLOS HIRAM ACOSTA GALICIA",
+  "beneficiary_bank":         "40012",
+  "beneficiary_account_type": "CLABE",
+  "beneficiary_tax_id":       "GUMJ501228BY2",
+  "latitude":                 "19.388113",
+  "longitude":                "-99.252684"
+}
+```
+
+### Respuesta éxito
+```json
+{ "status": "success", "transaction_id": "...", "tracking_code": "PEIBO0000275002" }
+```
+
+### Respuesta error
+```
+HTTP 400 / 401 / 422 / 502
+detail: "string con el mensaje de Peibo o del backend"
+```
+
+### Notas del backend
+- Requiere permiso `companies:update`
+- `transaction_id` se genera automáticamente (UUID hex 32 chars) — no lo envía el frontend
+- La firma HMAC-SHA256 la genera el backend usando `peibo_api_key` de la compañía
+- `latitude`/`longitude` tienen default CDMX si no se envían
+- Todos los intentos (éxito o error) quedan en `payment_log`
+
+---
+
+## Endpoints auxiliares
+
+```
+GET /api/companies/?skip=0&limit=200  → lista de compañías (para el selector)
+GET /api/banks/                        → lista de bancos (para el selector)
+```
+
+Permiso para companies: `companies:read`
+Bancos: cualquier usuario autenticado
+
+---
+
+## Layout
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│ ← Volver a Configuración                                         │
+│                                                                   │
+│ Prueba de Transferencia SPEI                                      │
+│ ────                                                              │
+│                                                                   │
+│ ┌─────────────────────────────┐  ┌──────────────────────────┐   │
+│ │ CONFIGURACIÓN               │  │ (vacío inicial)           │   │
+│ │ Compañía * [Autocomplete ▼] │  │  icono grande centrado    │   │
+│ │                             │  │  "El resultado aparecerá  │   │
+│ │ Concepto *   Referencia *   │  │   aquí después de enviar" │   │
+│ │ [________]   [_______]      │  │                           │   │
+│ │                             │  │ ── tras éxito ──          │   │
+│ │ Monto *                     │  │ ✓ Transferencia enviada   │   │
+│ │ $ [________]                │  │ transaction_id: ...       │   │
+│ │                             │  │ tracking_code: PEIBO...   │   │
+│ │ BENEFICIARIO                │  │ [JSON completo expandido] │   │
+│ │ Nombre completo *           │  │                           │   │
+│ │ [________________________]  │  │ ── tras error ──          │   │
+│ │                             │  │ ✗ Error en transferencia  │   │
+│ │ Cuenta *      Tipo *        │  │ [v-alert error message]   │   │
+│ │ [__________]  [CLABE ▼]    │  └──────────────────────────┘   │
+│ │                             │                                   │
+│ │ Banco * [Autocomplete ▼]   │                                   │
+│ │                             │                                   │
+│ │ RFC (opcional)              │                                   │
+│ │ [________________________]  │                                   │
+│ │                             │                                   │
+│ │            [Limpiar] [Enviar transferencia →]                  │
+│ └─────────────────────────────┘                                   │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Ruta
+
+```js
+{
+  path: '/payments/test',
+  name: 'payment-test',
+  component: () => import('@/views/modules/PaymentTest.vue'),
+  meta: { requiresAuth: true, title: 'Prueba de Transferencia', requiredPermission: 'companies:update' }
+}
+```
+
+---
+
+## Card en Settings.vue
+
+```js
+{
+  name:        'payment-test',
+  title:       'Prueba de Pago',
+  description: 'Enviar una transferencia SPEI individual vía Peibo',
+  icon:        'mdi-bank-transfer-out',
+  color:       'deep-purple',
+  route:       '/payments/test',
+  permission:  'companies:update',
+},
+```
+
+---
+
+## Notas de implementación
+
+- El selector de **compañías** usa `v-autocomplete`. Cada opción muestra un icono verde
+  (`mdi-bank-check`) si la compañía tiene `peibo_customer_key` y `peibo_api_key`, o naranja
+  (`mdi-bank-off`) si le faltan credenciales.
+- El selector de **bancos** carga desde `/api/banks/` y muestra `"40012 — BBVA BANCOMER"`.
+- `beneficiary_account_type` es un `v-select` con opciones `["CLABE","TDD","CELULAR"]`.
+- El panel derecho tiene tres estados: vacío (inicial), éxito, error.
+- En éxito se muestra el JSON completo en `<pre>` sobre fondo gris.
+- Al limpiar el formulario también se borra el panel de resultado.
+- No hay tabla ni historial en esta pantalla — eso va en el módulo de saldos de conductores.

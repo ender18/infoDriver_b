@@ -1,0 +1,258 @@
+# PROMPT: Módulo Compañías — Añadir campos Peibo
+# Frontend Vue 3 + Vuetify 3
+
+## Contexto
+
+Archivo a modificar: `src/views/modules/Companies.vue`
+(único archivo, no crear nuevos)
+
+El módulo ya funciona con CRUD completo. Solo hay que añadir los 3 campos
+de Peibo al formulario de crear/editar y un indicador visual en la tabla.
+No romper nada de lo que ya existe.
+
+---
+
+## Campos nuevos en el backend
+
+El endpoint `GET /companies/` ya devuelve estos campos en la respuesta:
+```json
+{
+  "peibo_customer_key":       "25ad137fc5778cde...",
+  "peibo_api_key":            "d2c36018a3fb92d1...",
+  "peibo_originator_account": "732020200001003675"
+}
+```
+
+Los tres son opcionales (pueden ser `null`).
+Se actualizan con `PATCH /companies/{id}` enviando solo los campos que cambian.
+
+---
+
+## Cambio 1 — Indicador Peibo en la tabla
+
+Añadir una columna entre "Activo" y "Creado" que muestre si la compañía
+tiene Peibo configurado (los 3 campos completos) o no.
+
+### En `headers`:
+```js
+{ title: 'Peibo', key: 'peibo_status', align: 'center', sortable: false },
+```
+
+### Slot en la tabla:
+```vue
+<template #item.peibo_status="{ item }">
+  <v-tooltip
+    :text="peiboConfigured(item) ? 'Peibo configurado' : 'Sin configuración Peibo'"
+    location="top"
+  >
+    <template #activator="{ props }">
+      <v-icon v-bind="props" :color="peiboConfigured(item) ? 'success' : 'secondary'" size="18">
+        {{ peiboConfigured(item) ? 'mdi-bank-check' : 'mdi-bank-off' }}
+      </v-icon>
+    </template>
+  </v-tooltip>
+</template>
+```
+
+### Helper en `<script setup>`:
+```js
+const peiboConfigured = (c) =>
+  !!(c.peibo_customer_key && c.peibo_api_key && c.peibo_originator_account)
+```
+
+---
+
+## Cambio 2 — Formulario crear/editar
+
+### Ampliar el diálogo
+Cambiar `max-width="560"` a `max-width="640"` para acomodar los nuevos campos.
+
+### Separar visualmente las dos secciones de credenciales
+
+Después del campo `api_subscription_key` y antes del `v-switch` de `is_active`,
+añadir un separador y la sección de Peibo:
+
+```vue
+<!-- Separador visual -->
+<v-col cols="12">
+  <v-divider class="my-1" />
+  <div class="text-caption text-medium-emphasis mt-2 mb-1 font-weight-medium">
+    Configuración Peibo (pagos)
+  </div>
+</v-col>
+
+<!-- Customer Key -->
+<v-col cols="12">
+  <v-text-field
+    v-model="form.peibo_customer_key"
+    label="X-CUSTOMER-KEY"
+    :type="showPeiboKey ? 'text' : 'password'"
+    variant="outlined"
+    density="compact"
+    :append-inner-icon="showPeiboKey ? 'mdi-eye-off' : 'mdi-eye'"
+    @click:append-inner="showPeiboKey = !showPeiboKey"
+    :hint="editTarget ? 'Dejar vacío para no modificar' : ''"
+    persistent-hint
+  />
+</v-col>
+
+<!-- API Key -->
+<v-col cols="12">
+  <v-text-field
+    v-model="form.peibo_api_key"
+    label="API Key"
+    :type="showPeiboKey ? 'text' : 'password'"
+    variant="outlined"
+    density="compact"
+    hint="Misma visibilidad que X-CUSTOMER-KEY"
+    persistent-hint
+  />
+</v-col>
+
+<!-- Cuenta originaria -->
+<v-col cols="12">
+  <v-text-field
+    v-model="form.peibo_originator_account"
+    label="Cuenta originaria (CLABE)"
+    variant="outlined"
+    density="compact"
+    hint="Cuenta desde la que salen los pagos"
+    persistent-hint
+  />
+</v-col>
+```
+
+Los tres campos de Peibo comparten el toggle `showPeiboKey` (un solo botón
+controla la visibilidad de customer key y api key).
+
+---
+
+## Cambio 3 — `<script setup>`
+
+### Añadir ref para visibilidad Peibo
+```js
+const showPeiboKey = ref(false)
+```
+
+### Actualizar `emptyForm()`
+```js
+const emptyForm = () => ({
+  name: '', address: '', country: '', email: '', phone: '',
+  api_base_url: '', api_subscription_key: '', is_active: true,
+  peibo_customer_key: '', peibo_api_key: '', peibo_originator_account: '',
+})
+```
+
+### Actualizar `openEdit(company)`
+Añadir los 3 campos al mapeo. Las credenciales Peibo se pre-cargan
+en texto plano (son editables, a diferencia de `api_subscription_key`
+que se deja vacía por seguridad):
+```js
+const openEdit = (company) => {
+  editTarget.value = company
+  form.value = {
+    name:                    company.name,
+    address:                 company.address              ?? '',
+    country:                 company.country              ?? '',
+    email:                   company.email                ?? '',
+    phone:                   company.phone                ?? '',
+    api_base_url:            company.api_base_url,
+    api_subscription_key:    '',                           // siempre vacío al editar
+    is_active:               company.is_active,
+    peibo_customer_key:      company.peibo_customer_key       ?? '',
+    peibo_api_key:           company.peibo_api_key            ?? '',
+    peibo_originator_account: company.peibo_originator_account ?? '',
+  }
+  nameError.value  = ''
+  showKey.value    = false
+  showPeiboKey.value = false
+  formDialog.value = true
+}
+```
+
+### Actualizar `openCreate()`
+Resetear también `showPeiboKey`:
+```js
+const openCreate = () => {
+  editTarget.value = null
+  form.value = emptyForm()
+  nameError.value  = ''
+  showKey.value    = false
+  showPeiboKey.value = false
+  formDialog.value = true
+}
+```
+
+### Actualizar `submitForm()` — bloque EDITAR
+
+Añadir comparación de los 3 campos nuevos al construir `payload`:
+```js
+// Peibo — solo enviar si el campo tiene valor (vacío = no modificar)
+if (form.value.peibo_customer_key !== (original.peibo_customer_key ?? ''))
+  payload.peibo_customer_key = form.value.peibo_customer_key || null
+
+if (form.value.peibo_api_key !== (original.peibo_api_key ?? ''))
+  payload.peibo_api_key = form.value.peibo_api_key || null
+
+if (form.value.peibo_originator_account !== (original.peibo_originator_account ?? ''))
+  payload.peibo_originator_account = form.value.peibo_originator_account || null
+```
+
+### Actualizar `submitForm()` — bloque CREAR
+
+Añadir los 3 campos al objeto que se envía:
+```js
+const { data } = await apiClient.post('/companies/', {
+  name:                     form.value.name,
+  address:                  form.value.address || null,
+  country:                  form.value.country || null,
+  email:                    form.value.email   || null,
+  phone:                    form.value.phone   || null,
+  api_base_url:             form.value.api_base_url,
+  api_subscription_key:     form.value.api_subscription_key,
+  peibo_customer_key:       form.value.peibo_customer_key       || null,
+  peibo_api_key:            form.value.peibo_api_key            || null,
+  peibo_originator_account: form.value.peibo_originator_account || null,
+})
+```
+
+---
+
+## Resultado visual esperado
+
+### Tabla
+```
+Nombre       País    Email   Teléfono   Peibo   Activo   Creado
+MX Taxi      México  ...     ...        ✓       ✓        12 may 2026
+UK Fleet     UK      ...     ...        ✗       ✓        10 may 2026
+```
+- `✓` (mdi-bank-check, verde) = los 3 campos configurados
+- `✗` (mdi-bank-off, gris)    = falta al menos uno
+
+### Formulario de editar
+```
+┌──────────────────────────────────────────────┐
+│  Nombre *          [MX Taxi              ]   │
+│  País    [México]  Teléfono [+52...]         │
+│  Email             Dirección                  │
+│  API Base URL *    [https://autocab-api...]  │
+│  Subscription Key  [••••••••••••••••]  👁    │
+│ ─── Configuración Peibo (pagos) ─────────── │
+│  X-CUSTOMER-KEY    [••••••••••••••••]  👁    │
+│  API Key           [••••••••••••••••]        │
+│  Cuenta originaria [732020200001003675]      │
+│  ☑ Compañía activa                           │
+└──────────────────────────────────────────────┘
+```
+
+---
+
+## Notas
+
+- `showPeiboKey` controla la visibilidad de `peibo_customer_key` y `peibo_api_key`
+  simultáneamente — un solo toggle para ambos campos sensibles.
+- `peibo_originator_account` no se oculta (es una CLABE, no un secreto).
+- Al editar, los campos Peibo se pre-cargan con el valor actual para facilitar
+  la revisión — a diferencia de `api_subscription_key` que siempre se muestra vacío.
+- Enviar `null` (no string vacío) cuando el campo se borra, para que el backend
+  guarde `NULL` en BD y el icono de la tabla muestre "sin configurar" correctamente.

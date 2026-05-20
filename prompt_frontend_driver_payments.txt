@@ -1,0 +1,268 @@
+# PROMPT: Módulo de Pagos Peibo — Frontend Vue 3 + Vuetify 3
+
+## Contexto
+
+Frontend: `/home/ender/Projects/infoDriver_f`
+Integración de pagos individuales SPEI vía Peibo. Hay dos partes:
+1. **Página de prueba standalone** (`PaymentTest.vue`) — para probar pagos desde Configuración
+2. **Botón "Pagar" en la tabla de conductores** (`DriversAccounts.vue`) — pago individual por fila
+
+El backend genera automáticamente: `transaction_id` (UUID hex 32), `reference` (7 dígitos random),
+`date_time` (UTC now), firma HMAC-SHA256. El frontend solo envía los datos del beneficiario.
+
+---
+
+## Archivos modificados / creados
+
+| Archivo | Acción |
+|---------|--------|
+| `src/views/modules/PaymentTest.vue`  | CREAR — página de prueba standalone |
+| `src/views/modules/DriversAccounts.vue` | MODIFICAR — añadir botón Pagar por fila |
+| `src/router/modules/modules.js` | MODIFICAR — añadir ruta `/payments/test` |
+
+---
+
+## Endpoints de pago
+
+### POST /api/payments/transfer
+Transferencia manual con todos los datos del beneficiario.
+Requiere permiso `companies:update`.
+
+**Body:**
+```json
+{
+  "company_id":               1,
+  "concept":                  "Test Prueba",
+  "amount":                   "10.00",
+  "beneficiary_account":      "012180015760711095",
+  "beneficiary_name":         "CARLOS HIRAM ACOSTA GALICIA",
+  "beneficiary_bank":         "40012",
+  "beneficiary_account_type": "CLABE",
+  "beneficiary_tax_id":       null,
+  "latitude":                 "19.388113",
+  "longitude":                "-99.252684"
+}
+```
+
+**Respuesta éxito:**
+```json
+{ "status": "success", "transaction_id": "...", "tracking_code": "PEIBO0000275002" }
+```
+
+---
+
+### POST /api/payments/transfer/driver/{driver_id}?company_id={id}
+Pago automático de un conductor usando sus datos de `driver_accounts`.
+Requiere permiso `companies:update`. No lleva body.
+
+El backend auto-detecta:
+- `beneficiary_name` = `forename + surname`
+- `beneficiary_account` = `bank_sort_code`
+- `beneficiary_account_type` = CLABE (18d) o TDD (16d) según longitud
+- `beneficiary_bank` = búsqueda en tabla `banks` por `bank_name`
+- `amount` = `process_balance_before`
+- `concept` = `"bookings"` (fijo)
+
+**Validaciones del backend:**
+- `payment_status === 'success'` → 400 "ya fue pagado"
+- `process_balance_before <= 0` → 400 "sin saldo verificado"
+- Banco no encontrado en catálogo → 422
+- Sin credenciales Peibo en compañía → 422
+
+**Respuesta éxito:**
+```json
+{
+  "status": "success",
+  "transaction_id": "...",
+  "tracking_code": "PEIBO0000275002",
+  "driver_id": 123,
+  "amount": "1500.00",
+  "beneficiary": "LUIS TOSTADO PADILLA"
+}
+```
+
+**Errores HTTP:** 400 / 401 / 422 / 502 — `detail` contiene el mensaje legible.
+
+---
+
+## Endpoints auxiliares
+
+```
+GET /api/companies/?skip=0&limit=200  → selector de compañías
+GET /api/banks/                        → selector de bancos (código + nombre)
+```
+
+---
+
+## Archivo 1 — `src/views/modules/PaymentTest.vue` (NUEVO)
+
+Página de dos columnas: formulario a la izquierda, panel de resultado a la derecha.
+Accesible desde `/payments/test`. Ruta con `requiredPermission: 'companies:update'`.
+NO aparece en el sidebar ni en Configuración.
+
+### Estados del panel de resultado
+- **Vacío** (inicial): icono `mdi-bank-transfer-out` centrado con texto descriptivo
+- **Éxito**: chip verde con `tracking_code` + JSON completo en `<pre>` sobre fondo gris
+- **Error**: `v-alert` type="error" con el mensaje del backend
+
+### Selector de compañías
+Usa `v-autocomplete`. Cada opción muestra icono verde (`mdi-bank-check`) si la compañía
+tiene `peibo_customer_key` y `peibo_api_key`, o naranja (`mdi-bank-off`) si le faltan.
+
+### Selector de bancos
+Carga desde `/api/banks/`. Muestra `"40012 — BBVA BANCOMER"` en el dropdown.
+
+### Campos del formulario
+| Campo | Nota |
+|-------|------|
+| Compañía * | `v-autocomplete` con indicador Peibo |
+| Concepto * | max 40 chars, counter visible |
+| Monto (MXN) * | prefix `$`, validación `/^\d+(\.\d{1,2})?$/` |
+| Nombre completo * | max 40 chars |
+| Cuenta * | 10–18 dígitos |
+| Tipo * | `v-select`: CLABE / TDD / CELULAR |
+| Banco * | `v-autocomplete` cargado desde `/api/banks/` |
+| RFC | opcional, 12–13 chars |
+
+Botón limpiar resetea formulario Y panel de resultado.
+Botón enviar: `color="deep-purple"`, `variant="flat"`, `append-icon="mdi-send"`.
+
+### Script (puntos clave)
+```javascript
+const emptyForm = () => ({
+  company_id: null, concept: '', amount: '',
+  beneficiary_account: '', beneficiary_name: '',
+  beneficiary_bank: '', beneficiary_account_type: 'CLABE',
+  beneficiary_tax_id: '', latitude: '19.388113', longitude: '-99.252684',
+})
+
+// Bancos: añadir campo display para el autocomplete
+banks.value = data.map(b => ({ ...b, display: `${b.code} — ${b.name}` }))
+
+// Payload: beneficiary_tax_id va null si está vacío
+beneficiary_tax_id: form.value.beneficiary_tax_id || null,
+```
+
+### Ruta en modules.js
+```javascript
+{
+  path: '/payments/test',
+  name: 'payment-test',
+  component: () => import('@/views/modules/PaymentTest.vue'),
+  meta: { requiresAuth: true, title: 'Prueba de Transferencia', requiredPermission: 'companies:update' }
+}
+```
+
+---
+
+## Archivo 2 — `src/views/modules/DriversAccounts.vue` (MODIFICAR)
+
+### Cambios en `<script setup>`
+
+**Añadir ref para tracking del estado de pago por conductor:**
+```javascript
+const payingDrivers = ref({})  // { [driver_id]: true } mientras se está pagando
+```
+
+**Añadir función paySingle:**
+```javascript
+const paySingle = async (item) => {
+  payingDrivers.value[item.driver_id] = true
+  try {
+    const { data } = await apiClient.post(
+      `/payments/transfer/driver/${item.driver_id}`,
+      null,
+      { params: { company_id: selectedCompanyId.value } },
+    )
+    const row = tools.accountsResult.results.find(r => r.driver_id === item.driver_id)
+    if (row) {
+      row.payment_status      = 'pending'
+      row.peibo_tracking_code = data.tracking_code
+    }
+    showSnack(`Pago enviado · ${data.tracking_code}`, 'success')
+  } catch (err) {
+    const detail = err.response?.data?.detail
+    showSnack(typeof detail === 'string' ? detail : 'Error al enviar el pago', 'error')
+  } finally {
+    delete payingDrivers.value[item.driver_id]
+  }
+}
+```
+
+**Ampliar ancho de la columna actions:**
+```javascript
+{ title: '', key: 'actions', sortable: false, width: '160px' },
+```
+
+### Cambios en `<template>` — slot `#item.actions`
+
+Reemplazar el botón único "Procesar" por un `div` con dos botones:
+
+```vue
+<template #item.actions="{ item }">
+  <div class="d-flex gap-1">
+    <v-btn
+      size="x-small" variant="tonal" color="warning"
+      :loading="item.process_status === 'processing'"
+      :disabled="tools.accountsRefreshing || item.process_status === 'processing'"
+      @click="processSingle(item)"
+    >
+      Procesar
+    </v-btn>
+    <v-btn
+      v-if="auth.hasPermission('companies:update')"
+      size="x-small" variant="tonal" color="deep-purple"
+      :loading="payingDrivers[item.driver_id]"
+      :disabled="
+        tools.accountsRefreshing ||
+        payingDrivers[item.driver_id] ||
+        item.payment_status === 'success' ||
+        !item.process_balance_before ||
+        item.process_balance_before <= 0
+      "
+      @click="paySingle(item)"
+    >
+      {{ item.payment_status === 'success' ? 'Pagado' : 'Pagar' }}
+    </v-btn>
+  </div>
+</template>
+```
+
+### Lógica del botón Pagar
+- Solo visible con permiso `companies:update`
+- **Deshabilitado** si: ya pagado (`payment_status === 'success'`), sin saldo verificado
+  (`process_balance_before <= 0`), se está pagando ahora, o hay refresh activo
+- **Loading** individual por conductor mientras se procesa su pago
+- Tras éxito: texto cambia a **"Pagado"**, snackbar muestra el `tracking_code`
+- El botón NO requiere que `process_status === 'done'` — se puede pagar directamente
+
+---
+
+## Webhook (ya implementado en backend)
+
+```
+POST /api/webhooks/peibo
+```
+
+No requiere autenticación. Peibo llama a este endpoint cuando liquida una transferencia.
+Actualiza `payment_status = 'success'` en `driver_accounts` y `driver_accounts_history`
+identificando el registro por `tracking_code`.
+La URL pública que se comparte con Peibo es: `https://tu-dominio.com/api/webhooks/peibo`
+
+---
+
+## Flujo completo de un pago
+
+```
+1. Usuario pulsa "Pagar" en la fila del conductor
+2. Frontend → POST /api/payments/transfer/driver/{id}?company_id={id}
+3. Backend busca banco SPEI por bank_name en tabla banks
+4. Backend firma con HMAC-SHA256 usando peibo_api_key de la compañía
+5. Backend llama a Peibo QA → POST /latest/order/transfer
+6. Peibo responde: { status: "success", tracking_code: "PEIBO..." }
+7. Backend guarda tracking_code en driver_accounts + driver_accounts_history
+8. Frontend actualiza fila: payment_status = "pending", muestra tracking_code
+── más tarde ──
+9. Peibo llama al webhook: POST /api/webhooks/peibo con status "Liquidada"
+10. Backend actualiza payment_status = "success" en ambas tablas
+```

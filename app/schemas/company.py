@@ -11,6 +11,9 @@ class CompanyCreate(BaseModel):
     phone: Optional[str] = Field(None, max_length=30)
     api_base_url: str = Field(..., min_length=5)
     api_subscription_key: str = Field(..., min_length=1, max_length=255)
+    peibo_customer_key: Optional[str] = Field(None, max_length=255)
+    peibo_api_key: Optional[str] = Field(None, max_length=255)
+    peibo_originator_account: Optional[str] = Field(None, max_length=30)
 
 
 class CompanyUpdate(BaseModel):
@@ -21,6 +24,9 @@ class CompanyUpdate(BaseModel):
     phone: Optional[str] = Field(None, max_length=30)
     api_base_url: Optional[str] = Field(None, min_length=5)
     api_subscription_key: Optional[str] = Field(None, min_length=1, max_length=255)
+    peibo_customer_key: Optional[str] = Field(None, max_length=255)
+    peibo_api_key: Optional[str] = Field(None, max_length=255)
+    peibo_originator_account: Optional[str] = Field(None, max_length=30)
     is_active: Optional[bool] = None
 
 
@@ -33,6 +39,9 @@ class CompanyResponse(BaseModel):
     phone: Optional[str] = None
     api_base_url: str
     api_subscription_key: str
+    peibo_customer_key: Optional[str] = None
+    peibo_api_key: Optional[str] = None
+    peibo_originator_account: Optional[str] = None
     is_active: bool
     created_at: datetime
     updated_at: Optional[datetime] = None

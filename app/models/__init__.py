@@ -8,6 +8,7 @@ from app.models.company import Company
 from app.models.driver_account import DriverAccount
 from app.models.driver_account_history import DriverAccountHistory
 from app.models.payment_log import PaymentLog
+from app.models.bank import Bank
 
 __all__ = [
     "Base",
@@ -20,4 +21,5 @@ __all__ = [
     "DriverAccount",
     "DriverAccountHistory",
     "PaymentLog",
+    "Bank",
 ]
