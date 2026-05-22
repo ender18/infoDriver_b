@@ -125,7 +125,7 @@ def create_transfer(
 
     if resp.status_code == 401:
         _log(db, "payment_error", body.company_id, log_payload)
-        raise HTTPException(status_code=401, detail="Firma inválida o IP no autorizada por Peibo")
+        raise HTTPException(status_code=502, detail="Firma inválida o IP no autorizada por Peibo")
 
     if peibo_response.get("status") == "error":
         _log(db, "payment_error", body.company_id, log_payload)
@@ -238,7 +238,7 @@ def pay_driver(
 
     if http_status == 401:
         _log(db, "payment_error", company_id, log_payload)
-        raise HTTPException(status_code=401, detail="Firma inválida o IP no autorizada por Peibo")
+        raise HTTPException(status_code=502, detail="Firma inválida o IP no autorizada por Peibo")
 
     if peibo_response.get("status") == "error":
         _log(db, "payment_error", company_id, log_payload)
