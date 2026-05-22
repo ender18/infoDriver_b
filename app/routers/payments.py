@@ -1,6 +1,7 @@
 import hmac
 import hashlib
 import json
+import os
 import random
 import uuid
 from datetime import datetime, timezone
@@ -22,7 +23,7 @@ from app.utils.dependencies import require_permission
 
 router = APIRouter(prefix="/payments", tags=["payments"])
 
-PEIBO_BASE = "https://qa.peibo-api.lab-peibo.com"
+PEIBO_BASE = os.getenv("PEIBO_BASE_URL", "https://qa.peibo-api.lab-peibo.com")
 
 
 # ── Schemas ────────────────────────────────────────────────────────────────────
