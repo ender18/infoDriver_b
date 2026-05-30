@@ -11,11 +11,13 @@ from app.database import get_db
 from app.models.company import Company
 from app.models.driver_account import DriverAccount
 from app.models.driver_account_history import DriverAccountHistory
+from app.models.bank import Bank
 from app.models.payment_log import PaymentLog
 from app.utils.dependencies import require_permission
 from app.services.tools import drivers_client
 from app.services.tools import (
     authorization_validator,
+    bank_validator,
     curp_validator,
     email_validator,
     name_validator,
@@ -194,9 +196,12 @@ def validate_drivers(
     drivers        = data["drivers"]
     authorizations = data["authorizations"]
 
+    known_banks = {r.name.upper() for r in db.query(Bank.name).all()}
+
     all_results = []
     for validator in VALIDATORS:
         all_results.extend(validator.run(drivers, authorizations))
+    all_results.extend(bank_validator.run(drivers, authorizations, known_banks))
 
     return {
         "company":       {"id": company.id, "name": company.name},
