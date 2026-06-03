@@ -1,4 +1,5 @@
 from sqlalchemy import Column, Integer, String, Float, DateTime, Text, ForeignKey, Index
+from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.database import Base
 
@@ -31,6 +32,7 @@ class DriverAccount(Base):
 
     # Pago Peibo
     peibo_transaction_id  = Column(Integer, ForeignKey("peibo_transactions.id"), nullable=True)
+    peibo_transaction     = relationship("PeiboTransaction", foreign_keys=[peibo_transaction_id], lazy="select")
 
     __table_args__ = (
         Index("ix_driver_accounts_company_id",   "company_id"),

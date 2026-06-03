@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from fastapi.responses import StreamingResponse
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 import requests as http_requests
 import math
 import json
@@ -304,7 +304,9 @@ def refresh_driver_accounts(
         total_pages = math.ceil(total / PAGE_SIZE) if total else 1
 
         # ── TODO O NADA: archivar sesión anterior + borrar en un solo commit ──
-        existing = db.query(DriverAccount).filter(DriverAccount.company_id == company_id).all()
+        existing = db.query(DriverAccount).options(
+            joinedload(DriverAccount.peibo_transaction)
+        ).filter(DriverAccount.company_id == company_id).all()
         if existing:
             first = existing[0]
             archive_session = (
@@ -334,10 +336,11 @@ def refresh_driver_accounts(
                         h.process_balance_before = row.process_balance_before
                         h.processed_at           = row.processed_at
                         h.current_balance        = row.current_balance
-                        h.payment_status         = row.payment_status
+                        tx = row.peibo_transaction
+                        h.payment_status         = tx.status        if tx else None
                         h.peibo_transaction_id   = row.peibo_transaction_id
-                        h.peibo_tracking_code    = row.peibo_tracking_code
-                        h.peibo_paid_at          = row.peibo_paid_at
+                        h.peibo_tracking_code    = tx.tracking_code if tx else None
+                        h.peibo_paid_at          = tx.paid_at       if tx else None
                     else:
                         # No existe en histórico (datos legacy) — insertar
                         db.add(_history_row_from_account(row, session_id=archive_session))
