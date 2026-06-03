@@ -78,6 +78,14 @@ def _send_peibo_transfer(company: Company, peibo_payload: dict) -> tuple[int, di
         "X-MSG-SIGNATURE": signature,
         "X-CUSTOMER-KEY":  company.peibo_customer_key,
     }
+
+    print("=" * 60)
+    print("[PEIBO] URL:", f"{PEIBO_BASE}/latest/order/transfer")
+    print("[PEIBO] Headers:", json.dumps(headers, indent=2))
+    print("[PEIBO] Payload:", json.dumps(peibo_payload, indent=2, ensure_ascii=False))
+    print("[PEIBO] Payload string (firmado):", payload_str)
+    print("[PEIBO] Signature:", signature)
+
     try:
         resp = http_requests.post(
             f"{PEIBO_BASE}/latest/order/transfer",
@@ -86,12 +94,17 @@ def _send_peibo_transfer(company: Company, peibo_payload: dict) -> tuple[int, di
             timeout=30,
         )
     except http_requests.RequestException as exc:
+        print("[PEIBO] ERROR de conexión:", exc)
         raise HTTPException(status_code=502, detail=f"Error de conexión con Peibo: {exc}")
 
     try:
         peibo_response = resp.json()
     except Exception:
         peibo_response = {"raw": resp.text}
+
+    print("[PEIBO] HTTP status:", resp.status_code)
+    print("[PEIBO] Response:", json.dumps(peibo_response, indent=2, ensure_ascii=False))
+    print("=" * 60)
 
     return resp.status_code, peibo_response
 
