@@ -589,7 +589,7 @@ def list_history_sessions(
         s["drivers_with_balance"] += 1
         if r.process_status == "done":
             s["processed_count"] += 1
-        if r.payment_status == "success":
+        if r.process_status == "success":
             s["paid_count"] += 1
 
     return {"company": {"id": company.id, "name": company.name},
