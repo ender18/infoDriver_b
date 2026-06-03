@@ -7,6 +7,8 @@ from app.models.role_permission import role_permissions
 from app.models.company import Company
 from app.models.driver_account import DriverAccount
 from app.models.driver_account_history import DriverAccountHistory
+from app.models.peibo_transaction import PeiboTransaction
+from app.models.peibo_webhook_event import PeiboWebhookEvent
 from app.models.payment_log import PaymentLog
 from app.models.bank import Bank
 
@@ -20,6 +22,8 @@ __all__ = [
     "Company",
     "DriverAccount",
     "DriverAccountHistory",
+    "PeiboTransaction",
+    "PeiboWebhookEvent",
     "PaymentLog",
     "Bank",
 ]

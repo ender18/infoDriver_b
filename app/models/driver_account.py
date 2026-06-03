@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, Text, ForeignKey, Index, Numeric
+from sqlalchemy import Column, Integer, String, Float, DateTime, Text, ForeignKey, Index
 from sqlalchemy.sql import func
 from app.database import Base
 
@@ -30,29 +30,11 @@ class DriverAccount(Base):
     processed_at           = Column(DateTime(timezone=True), nullable=True)
 
     # Pago Peibo
-    payment_status       = Column(String(20),  nullable=True)
-    peibo_transaction_id = Column(String(100), nullable=True)
-    peibo_tracking_code  = Column(String(100), nullable=True, index=True)
-    peibo_paid_at        = Column(DateTime(timezone=True), nullable=True)
-
-    # Webhook Peibo
-    webhook_status              = Column(String(50),     nullable=True)
-    webhook_transaction_id      = Column(String(100),    nullable=True)
-    webhook_date_time           = Column(DateTime(timezone=True), nullable=True)
-    webhook_concept             = Column(String(255),    nullable=True)
-    webhook_reference           = Column(String(100),    nullable=True)
-    webhook_amount              = Column(Numeric(12, 2), nullable=True)
-    webhook_beneficiary_account = Column(String(30),     nullable=True)
-    webhook_originator_account  = Column(String(30),     nullable=True)
-    webhook_originator_bank     = Column(String(10),     nullable=True)
-    webhook_originator_name     = Column(String(200),    nullable=True)
-    webhook_originator_tax_id   = Column(String(20),     nullable=True)
-    webhook_type                = Column(String(20),     nullable=True)
-    webhook_refund_reason_code  = Column(Integer,        nullable=True)
-    webhook_received_at         = Column(DateTime(timezone=True), nullable=True)
+    peibo_transaction_id  = Column(Integer, ForeignKey("peibo_transactions.id"), nullable=True)
 
     __table_args__ = (
         Index("ix_driver_accounts_company_id",   "company_id"),
         Index("ix_driver_accounts_driver_id",    "driver_id"),
         Index("ix_driver_accounts_session_id",   "session_id"),
+        Index("ix_driver_accounts_peibo_tx",     "peibo_transaction_id"),
     )

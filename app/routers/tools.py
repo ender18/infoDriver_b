@@ -7,10 +7,14 @@ import requests as http_requests
 import math
 import json
 
+from sqlalchemy import func
+
 from app.database import get_db
 from app.models.company import Company
 from app.models.driver_account import DriverAccount
 from app.models.driver_account_history import DriverAccountHistory
+from app.models.peibo_transaction import PeiboTransaction
+from app.models.peibo_webhook_event import PeiboWebhookEvent
 from app.models.bank import Bank
 from app.models.payment_log import PaymentLog
 from app.utils.dependencies import require_permission
@@ -85,7 +89,7 @@ def _log(db: Session, event_type: str, company_id=None, driver_id=None,
     db.commit()
 
 
-def _row_to_dict(row) -> dict:
+def _row_to_dict(row, tx: PeiboTransaction = None, event: PeiboWebhookEvent = None) -> dict:
     return {
         "id":                       row.id,
         "driver_id":                row.driver_id,
@@ -105,65 +109,74 @@ def _row_to_dict(row) -> dict:
         "process_result":           row.process_result,
         "process_balance_before":   row.process_balance_before,
         "processed_at":             row.processed_at.isoformat() if row.processed_at else None,
-        "payment_status":           row.payment_status,
-        "peibo_transaction_id":     row.peibo_transaction_id,
-        "peibo_tracking_code":      row.peibo_tracking_code,
-        "peibo_paid_at":            row.peibo_paid_at.isoformat() if row.peibo_paid_at else None,
-        "webhook_status":           row.webhook_status,
-        "webhook_transaction_id":   row.webhook_transaction_id,
-        "webhook_date_time":        row.webhook_date_time.isoformat() if row.webhook_date_time else None,
-        "webhook_concept":          row.webhook_concept,
-        "webhook_reference":        row.webhook_reference,
-        "webhook_amount":           float(row.webhook_amount) if row.webhook_amount is not None else None,
-        "webhook_beneficiary_account": row.webhook_beneficiary_account,
-        "webhook_originator_account":  row.webhook_originator_account,
-        "webhook_originator_bank":     row.webhook_originator_bank,
-        "webhook_originator_name":     row.webhook_originator_name,
-        "webhook_originator_tax_id":   row.webhook_originator_tax_id,
-        "webhook_type":                row.webhook_type,
-        "webhook_refund_reason_code":  row.webhook_refund_reason_code,
-        "webhook_received_at":         row.webhook_received_at.isoformat() if row.webhook_received_at else None,
+        # Pago — leído de peibo_transactions
+        "payment_status":           tx.status        if tx    else None,
+        "peibo_transaction_id":     tx.id            if tx    else None,
+        "peibo_tracking_code":      tx.tracking_code if tx    else None,
+        "peibo_paid_at":            tx.paid_at.isoformat() if (tx and tx.paid_at) else None,
+        # Webhook — leído del último peibo_webhook_events
+        "webhook_status":              event.status             if event else None,
+        "webhook_transaction_id":      event.tracking_code      if event else None,
+        "webhook_date_time":           event.date_time.isoformat() if (event and event.date_time) else None,
+        "webhook_concept":             event.concept            if event else None,
+        "webhook_reference":           event.reference          if event else None,
+        "webhook_amount":              float(event.amount)      if (event and event.amount is not None) else None,
+        "webhook_beneficiary_account": event.beneficiary_account if event else None,
+        "webhook_originator_account":  event.originator_account  if event else None,
+        "webhook_originator_bank":     event.originator_bank     if event else None,
+        "webhook_originator_name":     event.originator_name     if event else None,
+        "webhook_originator_tax_id":   event.originator_tax_id   if event else None,
+        "webhook_type":                event.type                if event else None,
+        "webhook_refund_reason_code":  event.refund_reason_code  if event else None,
+        "webhook_received_at":         event.received_at.isoformat() if (event and event.received_at) else None,
     }
+
+
+def _load_tx_and_events(db: Session, rows: list) -> tuple[dict, dict]:
+    """Carga en batch PeiboTransaction y el último PeiboWebhookEvent para una lista de rows."""
+    tx_ids = [r.peibo_transaction_id for r in rows if r.peibo_transaction_id]
+    if not tx_ids:
+        return {}, {}
+
+    txs = {t.id: t for t in db.query(PeiboTransaction).filter(PeiboTransaction.id.in_(tx_ids)).all()}
+
+    # Subconsulta: id máximo de evento por transacción
+    latest_ids = (
+        db.query(func.max(PeiboWebhookEvent.id))
+        .filter(PeiboWebhookEvent.peibo_transaction_id.in_(tx_ids))
+        .group_by(PeiboWebhookEvent.peibo_transaction_id)
+        .all()
+    )
+    latest_id_list = [row[0] for row in latest_ids if row[0]]
+    events = {}
+    if latest_id_list:
+        for e in db.query(PeiboWebhookEvent).filter(PeiboWebhookEvent.id.in_(latest_id_list)).all():
+            events[e.peibo_transaction_id] = e
+
+    return txs, events
 
 
 def _history_row_from_account(row: DriverAccount, session_id: str | None = None) -> DriverAccountHistory:
     return DriverAccountHistory(
-        session_id                  = session_id or row.session_id or "legacy",
-        company_id                  = row.company_id,
-        driver_id                   = row.driver_id,
-        callsign                    = row.callsign,
-        forename                    = row.forename,
-        surname                     = row.surname,
-        bank_name                   = row.bank_name,
-        bank_sort_code              = row.bank_sort_code,
-        current_balance             = row.current_balance,
-        outstanding_amount          = row.outstanding_amount,
-        all_jobs_total              = row.all_jobs_total,
-        all_jobs_commission         = row.all_jobs_commission,
-        notes                       = row.notes,
-        fetched_at                  = row.fetched_at,
-        process_status              = row.process_status,
-        process_result              = row.process_result,
-        process_balance_before      = row.process_balance_before,
-        processed_at                = row.processed_at,
-        payment_status              = row.payment_status,
-        peibo_transaction_id        = row.peibo_transaction_id,
-        peibo_tracking_code         = row.peibo_tracking_code,
-        peibo_paid_at               = row.peibo_paid_at,
-        webhook_status              = row.webhook_status,
-        webhook_transaction_id      = row.webhook_transaction_id,
-        webhook_date_time           = row.webhook_date_time,
-        webhook_concept             = row.webhook_concept,
-        webhook_reference           = row.webhook_reference,
-        webhook_amount              = row.webhook_amount,
-        webhook_beneficiary_account = row.webhook_beneficiary_account,
-        webhook_originator_account  = row.webhook_originator_account,
-        webhook_originator_bank     = row.webhook_originator_bank,
-        webhook_originator_name     = row.webhook_originator_name,
-        webhook_originator_tax_id   = row.webhook_originator_tax_id,
-        webhook_type                = row.webhook_type,
-        webhook_refund_reason_code  = row.webhook_refund_reason_code,
-        webhook_received_at         = row.webhook_received_at,
+        session_id             = session_id or row.session_id or "legacy",
+        company_id             = row.company_id,
+        driver_id              = row.driver_id,
+        callsign               = row.callsign,
+        forename               = row.forename,
+        surname                = row.surname,
+        bank_name              = row.bank_name,
+        bank_sort_code         = row.bank_sort_code,
+        current_balance        = row.current_balance,
+        outstanding_amount     = row.outstanding_amount,
+        all_jobs_total         = row.all_jobs_total,
+        all_jobs_commission    = row.all_jobs_commission,
+        notes                  = row.notes,
+        fetched_at             = row.fetched_at,
+        process_status         = row.process_status,
+        process_result         = row.process_result,
+        process_balance_before = row.process_balance_before,
+        processed_at           = row.processed_at,
+        peibo_transaction_id   = row.peibo_transaction_id,
     )
 
 
@@ -235,11 +248,13 @@ def get_driver_accounts(
         .all()
     )
 
+    txs, events = _load_tx_and_events(db, rows)
+
     return {
         "company":              {"id": company.id, "name": company.name},
         "drivers_with_balance": len(rows),
         "fetched_at":           rows[0].fetched_at.isoformat() if rows else None,
-        "results":              [_row_to_dict(r) for r in rows],
+        "results":              [_row_to_dict(r, txs.get(r.peibo_transaction_id), events.get(r.peibo_transaction_id)) for r in rows],
     }
 
 
@@ -609,10 +624,12 @@ def get_history_session(
         .all()
     )
 
+    txs, events = _load_tx_and_events(db, rows)
+
     return {
         "company":    {"id": company.id, "name": company.name},
         "session_id": session_id,
-        "results":    [_row_to_dict(r) for r in rows],
+        "results":    [_row_to_dict(r, txs.get(r.peibo_transaction_id), events.get(r.peibo_transaction_id)) for r in rows],
     }
 
 
