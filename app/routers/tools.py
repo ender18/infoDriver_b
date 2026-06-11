@@ -1,4 +1,5 @@
 import uuid
+import re
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from fastapi.responses import StreamingResponse
@@ -7,9 +8,10 @@ import requests as http_requests
 import math
 import json
 
-from sqlalchemy import func
+from sqlalchemy import func, text, bindparam
+from sqlalchemy.exc import OperationalError
 
-from app.database import get_db
+from app.database import get_db, get_autocab_db
 from app.models.company import Company
 from app.models.driver_account import DriverAccount
 from app.models.driver_account_history import DriverAccountHistory
@@ -210,17 +212,187 @@ def validate_drivers(
     authorizations = data["authorizations"]
 
     known_banks = {r.name.upper() for r in db.query(Bank.name).all()}
+    cfg = company.validation_config or {}
 
     all_results = []
     for validator in VALIDATORS:
-        all_results.extend(validator.run(drivers, authorizations))
-    all_results.extend(bank_validator.run(drivers, authorizations, known_banks))
+        all_results.extend(validator.run(drivers, authorizations, cfg))
+    all_results.extend(bank_validator.run(drivers, authorizations, known_banks, cfg))
 
     return {
         "company":       {"id": company.id, "name": company.name},
         "total_drivers": len(drivers),
         "total_errors":  len(all_results),
         "results":       all_results,
+    }
+
+
+# ──────────────────────────────────────────────
+# Referidos
+# ──────────────────────────────────────────────
+
+_REF_RE = re.compile(r"^REF: (\S+)$")
+
+# Plan HERO — umbrales de viajes completados y bono parcial para el referidor
+_HERO_MILESTONES = [
+    {"viajes": 1,   "parcial": 500},
+    {"viajes": 15,  "parcial": 200},
+    {"viajes": 25,  "parcial": 300},
+    {"viajes": 50,  "parcial": 500},
+    {"viajes": 100, "parcial": 1000},
+]
+_HERO_ONGOING_THRESHOLD = 100   # a partir de aquí aplica bono recurrente
+_HERO_ONGOING_BONUS     = 2500
+
+
+def _calc_hero(completed: int) -> dict:
+    earned = 0
+    level  = 0
+    for i, m in enumerate(_HERO_MILESTONES):
+        if completed >= m["viajes"]:
+            earned += m["parcial"]
+            level   = i + 1
+    return {
+        "level":   level,          # 0 = sin viajes, 1-5 = milestone alcanzado
+        "earned":  earned,         # bono acumulado one-time para el referidor
+        "ongoing": completed >= _HERO_ONGOING_THRESHOLD,
+    }
+
+@router.get("/drivers/referrals")
+def get_driver_referrals(
+    company_id:  int = Query(...),
+    db:          Session = Depends(get_db),
+    autocab_db:  Session = Depends(get_autocab_db),
+    current_user=Depends(require_permission("tools:run")),
+):
+    company = db.query(Company).filter(
+        Company.id == company_id,
+        Company.is_active == True
+    ).first()
+    if not company:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Company not found")
+
+    try:
+        data = drivers_client.fetch_all(company.api_subscription_key)
+    except http_requests.exceptions.ConnectionError:
+        raise HTTPException(status_code=502, detail="No se pudo conectar a la API externa")
+    except http_requests.exceptions.Timeout:
+        raise HTTPException(status_code=504, detail="Tiempo de espera agotado")
+    except http_requests.exceptions.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"Error de la API externa: {e}")
+
+    drivers = data["drivers"]
+
+    # Índice por teléfono para resolver quién es el referidor
+    phone_map: dict[str, dict] = {}
+    for d in drivers:
+        for field in ("mobile", "telephone"):
+            phone = (d.get(field) or "").strip()
+            if phone:
+                phone_map[phone] = d
+
+    # Agrupar referidos por ref_value (postcode = "REF: <valor>")
+    groups: dict[str, list] = {}
+    for d in drivers:
+        postcode = ((d.get("postalAddress") or {}).get("postcode") or "").strip()
+        m = _REF_RE.match(postcode)
+        if not m:
+            continue
+        ref_value = m.group(1)
+        groups.setdefault(ref_value, []).append({
+            "driver_id": d.get("id"),
+            "callsign":  str(d.get("callsign") or ""),
+            "full_name": d.get("fullName"),
+            "email":     d.get("email"),
+        })
+
+    # ── Stats de viajes para los conductores referidos ──────────────────
+    # Recolectar todos los callsigns únicos de referidos
+    all_referred_callsigns = list({
+        r["callsign"]
+        for referred_list in groups.values()
+        for r in referred_list
+        if r["callsign"]
+    })
+
+    booking_map: dict[str, dict] = {}   # callsign → {completed, last_15d, last_booking_at}
+    if all_referred_callsigns:
+        try:
+            stmt = text("""
+                SELECT
+                    driver_callsign,
+                    COUNT(CASE WHEN archive_reason = 'Completed' THEN 1 END)                                                           AS completed_all,
+                    COUNT(CASE WHEN archive_reason = 'Completed'
+                               AND archive_time >= CURRENT_DATE - INTERVAL '14 days' THEN 1 END)                                       AS completed_15d,
+                    MAX(archive_time)                                                                                                   AS last_booking_at
+                FROM bookings
+                WHERE archive_reason IN ('Completed', 'Cancelled')
+                  AND driver_callsign IN :callsigns
+                GROUP BY driver_callsign
+            """).bindparams(bindparam("callsigns", expanding=True))
+
+            rows = autocab_db.execute(stmt, {"callsigns": all_referred_callsigns}).fetchall()
+            for row in rows:
+                booking_map[row.driver_callsign] = {
+                    "completed_all":    row.completed_all    or 0,
+                    "completed_15d":    row.completed_15d    or 0,
+                    "last_booking_at":  row.last_booking_at.isoformat() if row.last_booking_at else None,
+                }
+        except OperationalError:
+            pass   # Si la BD de Autocab no está disponible, seguimos sin stats
+
+    # ── Construir respuesta ──────────────────────────────────────────────
+    referrers = []
+    for ref_value, referred_list in groups.items():
+        referrer = phone_map.get(ref_value)
+
+        enriched_referred = []
+        referrer_total_bonus = 0
+
+        for r in referred_list:
+            stats = booking_map.get(r["callsign"])
+            if stats:
+                completed = stats["completed_all"]
+                hero      = _calc_hero(completed)
+                referrer_total_bonus += hero["earned"]
+                enriched_referred.append({
+                    **r,
+                    "completed_trips":  completed,
+                    "completed_15d":    stats["completed_15d"],
+                    "last_booking_at":  stats["last_booking_at"],
+                    "hero_level":       hero["level"],
+                    "hero_earned":      hero["earned"],
+                    "hero_ongoing":     hero["ongoing"],
+                })
+            else:
+                enriched_referred.append({
+                    **r,
+                    "completed_trips": 0,
+                    "completed_15d":   0,
+                    "last_booking_at": None,
+                    "hero_level":      0,
+                    "hero_earned":     0,
+                    "hero_ongoing":    False,
+                })
+
+        referrers.append({
+            "ref_value":        ref_value,
+            "callsign":         referrer.get("callsign") if referrer else None,
+            "full_name":        referrer.get("fullName") if referrer else None,
+            "referred_count":   len(enriched_referred),
+            "total_hero_bonus": referrer_total_bonus,
+            "referred":         enriched_referred,
+        })
+
+    referrers.sort(key=lambda x: x["referred_count"], reverse=True)
+
+    return {
+        "company":         {"id": company.id, "name": company.name},
+        "total_drivers":   len(drivers),
+        "total_referrers": len(referrers),
+        "total_referred":  sum(r["referred_count"] for r in referrers),
+        "hero_plan": _HERO_MILESTONES + [{"viajes": None, "parcial": _HERO_ONGOING_BONUS}],
+        "referrers":       referrers,
     }
 
 

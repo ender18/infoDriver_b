@@ -1,0 +1,139 @@
+Crea la vista `src/views/modules/Referidos.vue` para el módulo de Referidos dentro de Herramientas.
+
+---
+
+## Ruta y navegación
+
+- Ruta: `/tools/referrals`
+- Ya existe la tarjeta en Tools.vue apuntando a esta ruta.
+- Agregar la ruta en `src/router/modules/modules.js` siguiendo el mismo patrón de las demás rutas de tools:
+  path: '/tools/referrals', name: 'referrals', component: import de Referidos.vue,
+  meta: { requiresAuth: true, title: 'Referidos', requiredPermission: 'tools:run' }
+
+---
+
+## Endpoint
+
+GET /api/tools/drivers/referrals?company_id={id}
+
+Respuesta completa:
+```json
+{
+  "company": { "id": 1, "name": "..." },
+  "total_drivers": 120,
+  "total_referrers": 8,
+  "total_referred": 23,
+  "hero_plan": [
+    { "viajes": 1,    "parcial": 500  },
+    { "viajes": 15,   "parcial": 200  },
+    { "viajes": 25,   "parcial": 300  },
+    { "viajes": 50,   "parcial": 500  },
+    { "viajes": 100,  "parcial": 1000 },
+    { "viajes": null, "parcial": 2500 }
+  ],
+  "referrers": [
+    {
+      "ref_value": "5525340357",
+      "callsign": "A12",
+      "full_name": "Juan Pérez",
+      "referred_count": 5,
+      "total_hero_bonus": 3500,
+      "referred": [
+        {
+          "driver_id": 123,
+          "callsign": "B01",
+          "full_name": "Pedro López",
+          "email": "p@x.com",
+          "completed_trips": 45,
+          "completed_15d": 8,
+          "last_booking_at": "2026-06-09T14:30:00",
+          "hero_level": 3,
+          "hero_earned": 1000,
+          "hero_ongoing": false
+        }
+      ]
+    }
+  ]
+}
+```
+
+Notas importantes:
+- ref_value: valor del postcode después de "REF: " (puede ser teléfono u otro código)
+- Si ref_value coincide con el teléfono de un conductor → callsign y full_name tienen sus datos; si no → son null
+- Los referrers vienen ordenados de mayor a menor referred_count
+- completed_trips: viajes completados all-time del referido (base para el plan HERO)
+- completed_15d: viajes completados en los últimos 15 días
+- hero_level: nivel HERO alcanzado (0=sin viajes, 1–5=milestone alcanzado)
+- hero_earned: bono acumulado one-time que genera este referido para el referidor (MXN)
+- hero_ongoing: true si el referido ya superó 100 viajes (aplica bono recurrente de $2,500)
+- total_hero_bonus: suma de hero_earned de todos los referidos del referidor
+
+---
+
+## Plan HERO — referencia visual
+
+| Nivel | Viajes acumulados | Bono parcial |
+|-------|-------------------|-------------|
+| 1     | 1                 | $500        |
+| 2     | 15                | $200        |
+| 3     | 25                | $300        |
+| 4     | 50                | $500        |
+| 5     | 100               | $1,000      |
+| —     | >100 (recurrente) | $2,500      |
+
+El bono es acumulativo: un referido con 50 viajes genera $500+$200+$300+$500 = $1,500 para el referidor.
+
+---
+
+## UI — mismo estilo que el resto de vistas tools
+
+1. Botón "Volver a Herramientas" arriba (igual que DriversValidation.vue).
+
+2. Selector de compañía (v-select) — igual que en DriversValidation.vue.
+   Al cambiar la compañía, limpiar resultados y no consultar automáticamente.
+
+3. Botón "Consultar" que llama al endpoint. Muestra loading mientras carga.
+
+4. Cuatro chips de resumen cuando hay datos:
+   - Total conductores
+   - Referidores
+   - Referidos
+   - Bono total estimado (suma de total_hero_bonus de todos los referidores, formateado como $X,XXX MXN)
+
+5. v-data-table con los referidores — columnas:
+   Callsign | Nombre / Código | Referidos (v-chip teal) | Bono estimado ($X,XXX MXN, v-chip color amber)
+
+   - Si full_name tiene valor: mostrar callsign y full_name normalmente
+   - Si full_name es null: en columna Nombre mostrar ref_value en v-chip variant="tonal" color="secondary"
+
+6. Al expandir una fila de referidor, mostrar tabla de referidos con columnas:
+   Callsign | Nombre | Viajes totales | Últimos 15d | Nivel HERO | Bono generado | Último viaje
+
+   - Nivel HERO: mostrar como v-chip de color según nivel:
+     - Nivel 0: grey ("Sin viajes")
+     - Nivel 1: blue-grey ("Nivel 1 · $500")
+     - Nivel 2: teal ("Nivel 2 · $700")
+     - Nivel 3: green ("Nivel 3 · $1,000")
+     - Nivel 4: orange ("Nivel 4 · $1,500")
+     - Nivel 5 / ongoing=true: deep-purple ("Nivel 5 · $2,500" o "⭐ HERO")
+   - Bono generado: mostrar hero_earned formateado como "$X,XXX"
+   - Último viaje: last_booking_at formateado como fecha legible (o "—" si null)
+
+7. Al lado del título de la sección expandida mostrar el total_hero_bonus del referidor como:
+   "Bono estimado: $X,XXX MXN"
+
+8. Si referrers está vacío, mostrar mensaje vacío con ícono mdi-account-arrow-right.
+
+9. Tooltip o sección colapsable "Plan HERO" que muestre la tabla de niveles del hero_plan
+   de la respuesta (para referencia del operador).
+
+---
+
+## Consideraciones
+
+- Usar apiClient de `@/services/api`
+- Cargar compañías desde GET /api/companies/ al montar
+- Mismo patrón de snackbar para errores
+- No crear stores nuevos
+- Permiso requerido: tools:run (ya está en la ruta)
+- Los montos son en MXN; formatear siempre con signo $ y separador de miles

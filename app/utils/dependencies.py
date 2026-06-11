@@ -1,15 +1,16 @@
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, status, Response
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.user import User
-from app.utils.security import decode_access_token
+from app.utils.security import decode_access_token, create_access_token
 
 # Define el endpoint de login para OAuth2
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
 
 def get_current_user(
+    response: Response,
     token: str = Depends(oauth2_scheme),
     db: Session = Depends(get_db)
 ) -> User:
@@ -21,21 +22,25 @@ def get_current_user(
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
-    
+
     # Decodificar token
     payload = decode_access_token(token)
     if payload is None:
         raise credentials_exception
-    
+
     email: str = payload.get("sub")
     if email is None:
         raise credentials_exception
-    
+
     # Buscar usuario en BD
     user = db.query(User).filter(User.email == email).first()
     if user is None:
         raise credentials_exception
-    
+
+    # Sliding window: renovar el token en cada request autenticado
+    new_token = create_access_token(data={"sub": email})
+    response.headers["X-New-Token"] = new_token
+
     return user
 
 

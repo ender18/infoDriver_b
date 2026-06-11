@@ -6,10 +6,11 @@ app = FastAPI(title="Mi API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],  # URL de tu frontend Vue
+    allow_origins=["http://localhost:5173"],
     allow_credentials=True,
-    allow_methods=["*"],  # Permite todos los métodos (GET, POST, etc.)
-    allow_headers=["*"],  # Permite todos los headers
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["X-New-Token"],
 )
 
 # Incluir routers

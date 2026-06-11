@@ -3,7 +3,7 @@ import re
 SPECIAL_RE = re.compile(r"[áéíóúüñÁÉÍÓÚÜÑ]")
 
 
-def run(drivers: list[dict], authorizations: list[dict]) -> list[dict]:
+def run(drivers: list[dict], authorizations: list[dict], config: dict | None = None) -> list[dict]:
     results = []
     for d in drivers:
         for field in ("forename", "surname"):

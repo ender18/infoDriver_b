@@ -3,6 +3,13 @@ from typing import Optional
 from datetime import datetime
 
 
+class ValidationConfig(BaseModel):
+    allowed_towns: list[str]          = ["Mexico City", "Xalapa", "EDOMEX", "Veracruz"]
+    allowed_regions: list[str]        = ["CDMX", "EDOMEX", "Veracruz"]
+    phone_digits: int                 = 10
+    bank_sort_code_lengths: list[int] = [16, 18]
+
+
 class CompanyCreate(BaseModel):
     name: str = Field(..., min_length=2, max_length=150)
     address: Optional[str] = Field(None, max_length=255)
@@ -42,6 +49,7 @@ class CompanyResponse(BaseModel):
     peibo_customer_key: Optional[str] = None
     peibo_api_key: Optional[str] = None
     peibo_originator_account: Optional[str] = None
+    validation_config: Optional[ValidationConfig] = None
     is_active: bool
     created_at: datetime
     updated_at: Optional[datetime] = None

@@ -21,7 +21,7 @@ ESTADOS = {
 }
 
 
-def run(drivers: list[dict], authorizations: list[dict]) -> list[dict]:
+def run(drivers: list[dict], authorizations: list[dict], config: dict | None = None) -> list[dict]:
     results = []
     for d in drivers:
         badge    = d.get("badgeNumber", "") or ""

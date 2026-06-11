@@ -2,7 +2,7 @@ import re
 from collections import Counter
 
 
-def run(drivers: list[dict], authorizations: list[dict]) -> list[dict]:
+def run(drivers: list[dict], authorizations: list[dict], config: dict | None = None) -> list[dict]:
     emails_lower = [(d.get("email") or "").strip().lower() for d in drivers]
     duplicates = {e for e, c in Counter(emails_lower).items() if c > 1 and e}
 

@@ -5,7 +5,7 @@ from typing import List
 
 from app.database import get_db
 from app.models.company import Company
-from app.schemas.company import CompanyCreate, CompanyUpdate, CompanyResponse
+from app.schemas.company import CompanyCreate, CompanyUpdate, CompanyResponse, ValidationConfig
 from app.utils.dependencies import require_permission
 
 router = APIRouter(prefix="/companies", tags=["companies"])
@@ -78,6 +78,36 @@ def update_company(
     db.commit()
     db.refresh(company)
     return company
+
+
+@router.get("/{company_id}/validation-config", response_model=ValidationConfig)
+def get_validation_config(
+    company_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(require_permission("companies:read"))
+):
+    company = db.query(Company).filter(Company.id == company_id).first()
+    if not company:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Company not found")
+    cfg = company.validation_config or {}
+    return ValidationConfig(**cfg)
+
+
+@router.put("/{company_id}/validation-config", response_model=ValidationConfig)
+def update_validation_config(
+    company_id: int,
+    config: ValidationConfig,
+    db: Session = Depends(get_db),
+    current_user=Depends(require_permission("companies:update"))
+):
+    company = db.query(Company).filter(Company.id == company_id).first()
+    if not company:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Company not found")
+    company.validation_config = config.model_dump()
+    company.updated_at = func.now()
+    db.commit()
+    db.refresh(company)
+    return ValidationConfig(**company.validation_config)
 
 
 @router.delete("/{company_id}", status_code=status.HTTP_204_NO_CONTENT)
