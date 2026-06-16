@@ -1,0 +1,145 @@
+Crea la vista `src/views/modules/PaymentQueue.vue` — módulo de cola de pagos para aprobación por la contadora.
+
+---
+
+## Ruta
+
+Agregar en `src/router/modules/modules.js`:
+path: '/payment-queue', name: 'payment-queue', component: import de PaymentQueue.vue,
+meta: { requiresAuth: true, title: 'Cola de Pagos', requiredPermission: 'tools:run' }
+
+---
+
+## Endpoints
+
+### Listar
+GET /api/payment-queue/?company_id={id}&status={status}&source={source}&date_from=YYYY-MM-DD&date_to=YYYY-MM-DD
+
+Respuesta:
+```json
+{
+  "total": 15,
+  "total_amount": 4800.0,
+  "items": [
+    {
+      "id": 1,
+      "company_id": 1,
+      "source": "daily_bonus",
+      "driver_id": 123,
+      "callsign": "A12",
+      "forename": "Juan",
+      "surname": "Pérez",
+      "full_name": "Juan Pérez",
+      "bank_name": "BBVA",
+      "bank_sort_code": "012345678901234567",
+      "amount": 300.0,
+      "adjusted_amount": null,
+      "effective_amount": 300.0,
+      "notes": "Bono semana 2026-06-09/15",
+      "source_ref": "2026-06-09/2026-06-15",
+      "status": "pending",
+      "rejection_reason": null,
+      "queued_by": "operador@empresa.com",
+      "queued_at": "2026-06-11T10:00:00+00:00",
+      "reviewed_by": null,
+      "reviewed_at": null,
+      "peibo_transaction_id": null
+    }
+  ]
+}
+```
+
+### Aprobar uno
+PATCH /api/payment-queue/{id}/approve
+Body (opcional): { "adjusted_amount": 250.0 }
+
+### Rechazar
+PATCH /api/payment-queue/{id}/reject
+Body (opcional): { "rejection_reason": "Datos bancarios incorrectos" }
+
+### Descartar (solo rechazados)
+PATCH /api/payment-queue/{id}/discard
+
+### Aprobar en lote
+POST /api/payment-queue/bulk-approve?company_id={id}
+Body: { "ids": [1, 2, 3] }
+
+---
+
+## Fuentes (source) — etiquetas para mostrar en UI
+
+| Valor             | Etiqueta           | Color chip  |
+|-------------------|--------------------|-------------|
+| driver_balance    | Saldo conductor    | blue        |
+| referral_bonus    | Bono referido      | teal        |
+| daily_bonus       | Bono diario        | green       |
+| first_trips_bonus | Primeros viajes    | cyan        |
+| spei_transfer     | Transferencia SPEI | orange      |
+| individual        | Individual         | grey        |
+
+## Estados (status)
+
+| Valor     | Etiqueta   | Color   |
+|-----------|------------|---------|
+| pending   | Pendiente  | amber   |
+| approved  | Aprobado   | green   |
+| rejected  | Rechazado  | red     |
+| discarded | Descartado | grey    |
+| paid      | Pagado     | blue    |
+
+---
+
+## UI
+
+### Controles superiores
+- Selector de compañía
+- Date pickers: fecha inicio / fecha fin (default: semana actual)
+- Filtro por fuente (v-select, opcional)
+- Pills/tabs de estado: Todos | Pendientes | Aprobados | Rechazados | Descartados
+
+### Chips de resumen (cuando hay datos)
+- Total registros
+- Total a pagar (effective_amount de los filtrados)
+
+### Tabla principal
+
+Columnas: ☐ | Callsign | Nombre | Banco | Monto | Ajustado | Fuente | Estado | Encolado por | Fecha | Acciones
+
+- Checkbox por fila para selección múltiple
+- "Monto": amount. Si adjusted_amount existe, tachar amount y mostrar adjusted_amount en verde
+- "Fuente": v-chip con color según tabla de arriba
+- "Estado": v-chip con color según tabla de arriba
+
+### Acciones por fila (columna Acciones, solo si status = pending)
+- Botón aprobar (ícono ✓) → llama PATCH /approve. Si se hace click, abrir mini-dialog para ajustar monto opcionalmente antes de confirmar
+- Botón rechazar (ícono ✗) → abre dialog con campo de motivo (opcional), llama PATCH /reject
+
+Para status = rejected:
+- Botón "Reintentar" (ícono ↺) → llama PATCH /approve
+- Botón "Descartar" (ícono 🗑) → llama PATCH /discard con confirmación
+
+### Barra de acciones bulk (aparece al seleccionar ≥1 fila)
+Aparece fija en la parte inferior cuando hay checkboxes seleccionados:
+- "X seleccionados — Total: $X,XXX MXN"
+- Botón "Aprobar seleccionados" → llama POST /bulk-approve con los ids seleccionados
+- Botón "Seleccionar todos los pendientes" → selecciona todas las filas con status=pending de la página actual
+
+### Dialog de aprobación (single)
+- Campo "Monto ajustado" (number, opcional — si se deja vacío usa el monto original)
+- Botón Confirmar / Cancelar
+
+### Dialog de rechazo
+- Campo "Motivo del rechazo" (textarea, opcional)
+- Botón Confirmar / Cancelar
+
+---
+
+## Consideraciones
+
+- Usar apiClient de `@/services/api`
+- Cargar compañías desde GET /api/companies/ al montar
+- Snackbar para feedback de acciones
+- No crear stores nuevos
+- Permiso requerido: tools:run
+- Montos en MXN con formato $X,XXX
+- Recargar la lista después de cada acción (approve/reject/discard/bulk)

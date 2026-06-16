@@ -38,6 +38,7 @@ Respuesta completa:
       "full_name": "Juan Pérez",
       "referred_count": 5,
       "total_hero_bonus": 3500,
+      "this_week_bonus": 300,
       "referred": [
         {
           "driver_id": 123,
@@ -49,11 +50,44 @@ Respuesta completa:
           "last_booking_at": "2026-06-09T14:30:00",
           "hero_level": 3,
           "hero_earned": 1000,
-          "hero_ongoing": false
+          "hero_ongoing": false,
+          "hero_milestones": [
+            { "level": 1, "viajes": 1,  "parcial": 500, "reached_at": "2026-01-15T10:30:00" },
+            { "level": 2, "viajes": 15, "parcial": 200, "reached_at": "2026-02-20T14:00:00" },
+            { "level": 3, "viajes": 25, "parcial": 300, "reached_at": "2026-06-09T09:15:00" }
+          ],
+          "this_week_milestones": [
+            { "level": 3, "viajes": 25, "parcial": 300, "reached_at": "2026-06-09T09:15:00" }
+          ],
+          "this_week_bonus": 300
         }
       ]
     }
-  ]
+  ],
+  "weekly_payments": {
+    "week_start": "2026-06-09",
+    "week_end":   "2026-06-15",
+    "total_to_pay": 1500,
+    "referrers": [
+      {
+        "ref_value": "5525340357",
+        "callsign": "A12",
+        "full_name": "Juan Pérez",
+        "this_week_bonus": 300,
+        "drivers": [
+          {
+            "driver_id": 123,
+            "callsign": "B01",
+            "full_name": "Pedro López",
+            "milestones": [
+              { "level": 3, "viajes": 25, "parcial": 300, "reached_at": "2026-06-09T09:15:00" }
+            ],
+            "bonus": 300
+          }
+        ]
+      }
+    ]
+  }
 }
 ```
 
@@ -61,12 +95,10 @@ Notas importantes:
 - ref_value: valor del postcode después de "REF: " (puede ser teléfono u otro código)
 - Si ref_value coincide con el teléfono de un conductor → callsign y full_name tienen sus datos; si no → son null
 - Los referrers vienen ordenados de mayor a menor referred_count
-- completed_trips: viajes completados all-time del referido (base para el plan HERO)
-- completed_15d: viajes completados en los últimos 15 días
-- hero_level: nivel HERO alcanzado (0=sin viajes, 1–5=milestone alcanzado)
-- hero_earned: bono acumulado one-time que genera este referido para el referidor (MXN)
-- hero_ongoing: true si el referido ya superó 100 viajes (aplica bono recurrente de $2,500)
-- total_hero_bonus: suma de hero_earned de todos los referidos del referidor
+- hero_milestones: fechas exactas en que el referido completó los viajes de cada umbral
+- this_week_milestones: subconjunto de hero_milestones alcanzados en la semana actual (lunes–domingo)
+- this_week_bonus: suma de parcial de this_week_milestones (0 si no alcanzó ninguno esta semana)
+- weekly_payments: solo contiene referidores con bono > 0 esta semana, ordenados de mayor a menor bono
 
 ---
 
@@ -87,45 +119,61 @@ El bono es acumulativo: un referido con 50 viajes genera $500+$200+$300+$500 = $
 
 ## UI — mismo estilo que el resto de vistas tools
 
+### Sección principal
+
 1. Botón "Volver a Herramientas" arriba (igual que DriversValidation.vue).
 
-2. Selector de compañía (v-select) — igual que en DriversValidation.vue.
-   Al cambiar la compañía, limpiar resultados y no consultar automáticamente.
+2. Selector de compañía (v-select). Al cambiar la compañía, limpiar resultados.
 
-3. Botón "Consultar" que llama al endpoint. Muestra loading mientras carga.
+3. Botón "Consultar". Muestra loading mientras carga.
 
-4. Cuatro chips de resumen cuando hay datos:
-   - Total conductores
-   - Referidores
-   - Referidos
-   - Bono total estimado (suma de total_hero_bonus de todos los referidores, formateado como $X,XXX MXN)
+4. Cuando hay datos, mostrar en la misma fila:
+   - Chips de resumen: Total conductores | Referidores | Referidos | Bono acumulado total
+   - Botón "Pagos de la semana" que abre el modal semanal (badge con el monto si total_to_pay > 0)
 
 5. v-data-table con los referidores — columnas:
-   Callsign | Nombre / Código | Referidos (v-chip teal) | Bono estimado ($X,XXX MXN, v-chip color amber)
+   Callsign | Nombre / Código | Referidos (v-chip teal) | Bono acumulado (v-chip amber) | Bono esta semana (v-chip green, solo si > 0)
 
-   - Si full_name tiene valor: mostrar callsign y full_name normalmente
-   - Si full_name es null: en columna Nombre mostrar ref_value en v-chip variant="tonal" color="secondary"
+   - Si full_name es null: mostrar ref_value en v-chip variant="tonal" color="secondary"
 
-6. Al expandir una fila de referidor, mostrar tabla de referidos con columnas:
-   Callsign | Nombre | Viajes totales | Últimos 15d | Nivel HERO | Bono generado | Último viaje
+6. Al expandir fila de referidor — tabla de sus referidos con columnas:
+   Callsign | Nombre | Viajes totales | Últimos 15d | Nivel HERO | Bono generado | Último viaje | Esta semana
 
-   - Nivel HERO: mostrar como v-chip de color según nivel:
-     - Nivel 0: grey ("Sin viajes")
-     - Nivel 1: blue-grey ("Nivel 1 · $500")
-     - Nivel 2: teal ("Nivel 2 · $700")
-     - Nivel 3: green ("Nivel 3 · $1,000")
-     - Nivel 4: orange ("Nivel 4 · $1,500")
-     - Nivel 5 / ongoing=true: deep-purple ("Nivel 5 · $2,500" o "⭐ HERO")
-   - Bono generado: mostrar hero_earned formateado como "$X,XXX"
-   - Último viaje: last_booking_at formateado como fecha legible (o "—" si null)
+   - Nivel HERO: v-chip de color por nivel:
+     - 0: grey ("Sin viajes")
+     - 1: blue-grey ("Nv.1 · $500")
+     - 2: teal ("Nv.2 · $700")
+     - 3: green ("Nv.3 · $1,000")
+     - 4: orange ("Nv.4 · $1,500")
+     - 5 u ongoing=true: deep-purple ("⭐ HERO · $2,500+")
+   - Columna "Esta semana": si this_week_bonus > 0 mostrar v-chip color="green" con el monto,
+     si no mostrar "—"
+   - Al hacer hover o click en la fila, mostrar tooltip con hero_milestones completo
+     (tabla de fechas: "Nivel X alcanzado el DD/MM/YYYY")
 
-7. Al lado del título de la sección expandida mostrar el total_hero_bonus del referidor como:
-   "Bono estimado: $X,XXX MXN"
+7. Si referrers está vacío: mensaje vacío con ícono mdi-account-arrow-right.
 
-8. Si referrers está vacío, mostrar mensaje vacío con ícono mdi-account-arrow-right.
+8. Tooltip/panel colapsable "Plan HERO" con la tabla de niveles del hero_plan.
 
-9. Tooltip o sección colapsable "Plan HERO" que muestre la tabla de niveles del hero_plan
-   de la respuesta (para referencia del operador).
+---
+
+### Modal "Pagos de la semana"
+
+Activado con el botón "Pagos de la semana". Usa v-dialog.
+
+Encabezado:
+- Título: "Bonos a pagar — semana del {week_start} al {week_end}"
+- Total a pagar en grande: "$X,XXX MXN"
+
+Contenido:
+- Lista de referidores que tienen bono esta semana (weekly_payments.referrers)
+- Por cada referidor: nombre/callsign + bono total de la semana
+- Al expandir cada referidor: lista de sus conductores que alcanzaron milestone esta semana,
+  con columnas: Callsign | Nombre | Milestone alcanzado | Fecha | Bono
+  - "Milestone alcanzado" = "Viaje #N — Nivel X" (ej. "Viaje #25 — Nivel 3")
+  - "Bono" = $XXX MXN
+- Si weekly_payments.referrers está vacío: "Ningún referidor tiene bonos esta semana"
+- Botón de cerrar al pie del modal
 
 ---
 
@@ -136,4 +184,4 @@ El bono es acumulativo: un referido con 50 viajes genera $500+$200+$300+$500 = $
 - Mismo patrón de snackbar para errores
 - No crear stores nuevos
 - Permiso requerido: tools:run (ya está en la ruta)
-- Los montos son en MXN; formatear siempre con signo $ y separador de miles
+- Montos en MXN, formatear siempre con signo $ y separador de miles

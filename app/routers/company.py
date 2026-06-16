@@ -5,7 +5,7 @@ from typing import List
 
 from app.database import get_db
 from app.models.company import Company
-from app.schemas.company import CompanyCreate, CompanyUpdate, CompanyResponse, ValidationConfig
+from app.schemas.company import CompanyCreate, CompanyUpdate, CompanyResponse, ValidationConfig, BonusConfig
 from app.utils.dependencies import require_permission
 
 router = APIRouter(prefix="/companies", tags=["companies"])
@@ -108,6 +108,36 @@ def update_validation_config(
     db.commit()
     db.refresh(company)
     return ValidationConfig(**company.validation_config)
+
+
+@router.get("/{company_id}/bonus-config", response_model=BonusConfig)
+def get_bonus_config(
+    company_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(require_permission("companies:read"))
+):
+    company = db.query(Company).filter(Company.id == company_id).first()
+    if not company:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Company not found")
+    cfg = company.bonus_config or {}
+    return BonusConfig(**cfg)
+
+
+@router.put("/{company_id}/bonus-config", response_model=BonusConfig)
+def update_bonus_config(
+    company_id: int,
+    config: BonusConfig,
+    db: Session = Depends(get_db),
+    current_user=Depends(require_permission("companies:update"))
+):
+    company = db.query(Company).filter(Company.id == company_id).first()
+    if not company:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Company not found")
+    company.bonus_config = config.model_dump()
+    company.updated_at = func.now()
+    db.commit()
+    db.refresh(company)
+    return BonusConfig(**company.bonus_config)
 
 
 @router.delete("/{company_id}", status_code=status.HTTP_204_NO_CONTENT)

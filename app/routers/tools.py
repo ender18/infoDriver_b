@@ -1,6 +1,6 @@
 import uuid
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date, timedelta
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session, joinedload
@@ -19,6 +19,7 @@ from app.models.peibo_transaction import PeiboTransaction
 from app.models.peibo_webhook_event import PeiboWebhookEvent
 from app.models.bank import Bank
 from app.models.payment_log import PaymentLog
+from app.models.payment_queue import PaymentQueue
 from app.utils.dependencies import require_permission
 from app.services.tools import drivers_client
 from app.services.tools import (
@@ -91,7 +92,7 @@ def _log(db: Session, event_type: str, company_id=None, driver_id=None,
     db.commit()
 
 
-def _row_to_dict(row, tx: PeiboTransaction = None, event: PeiboWebhookEvent = None) -> dict:
+def _row_to_dict(row, tx: PeiboTransaction = None, event: PeiboWebhookEvent = None, queue_status: str = None) -> dict:
     return {
         "id":                       row.id,
         "driver_id":                row.driver_id,
@@ -111,8 +112,8 @@ def _row_to_dict(row, tx: PeiboTransaction = None, event: PeiboWebhookEvent = No
         "process_result":           row.process_result,
         "process_balance_before":   row.process_balance_before,
         "processed_at":             row.processed_at.isoformat() if row.processed_at else None,
-        # Pago — leído de peibo_transactions
-        "payment_status":           tx.status        if tx    else None,
+        # Pago — queue activa tiene prioridad sobre peibo_transactions
+        "payment_status":           "pending" if queue_status in ("pending", "approved") else (tx.status if tx else None),
         "peibo_transaction_id":     tx.id            if tx    else None,
         "peibo_tracking_code":      tx.tracking_code if tx    else None,
         "peibo_paid_at":            tx.paid_at.isoformat() if (tx and tx.paid_at) else None,
@@ -306,8 +307,12 @@ def get_driver_referrals(
             "email":     d.get("email"),
         })
 
+    # ── Semana actual (lunes–domingo) ────────────────────────────────────
+    today      = date.today()
+    week_start = today - timedelta(days=today.weekday())   # lunes
+    week_end   = week_start + timedelta(days=7)            # lunes siguiente (exclusivo)
+
     # ── Stats de viajes para los conductores referidos ──────────────────
-    # Recolectar todos los callsigns únicos de referidos
     all_referred_callsigns = list({
         r["callsign"]
         for referred_list in groups.values()
@@ -315,84 +320,155 @@ def get_driver_referrals(
         if r["callsign"]
     })
 
-    booking_map: dict[str, dict] = {}   # callsign → {completed, last_15d, last_booking_at}
+    booking_map: dict[str, dict] = {}    # callsign → totales
+    milestone_map: dict[str, list] = {}  # callsign → [{trip_num, reached_at}]
+
     if all_referred_callsigns:
         try:
-            stmt = text("""
+            # Query 1 — totales por conductor
+            totals_stmt = text("""
                 SELECT
                     driver_callsign,
-                    COUNT(CASE WHEN archive_reason = 'Completed' THEN 1 END)                                                           AS completed_all,
-                    COUNT(CASE WHEN archive_reason = 'Completed'
-                               AND archive_time >= CURRENT_DATE - INTERVAL '14 days' THEN 1 END)                                       AS completed_15d,
-                    MAX(archive_time)                                                                                                   AS last_booking_at
+                    COUNT(*)                                                                          AS completed_all,
+                    COUNT(CASE WHEN archive_time >= CURRENT_DATE - INTERVAL '14 days' THEN 1 END)   AS completed_15d,
+                    MAX(archive_time)                                                                 AS last_booking_at
                 FROM bookings
-                WHERE archive_reason IN ('Completed', 'Cancelled')
+                WHERE archive_reason = 'Completed'
                   AND driver_callsign IN :callsigns
                 GROUP BY driver_callsign
             """).bindparams(bindparam("callsigns", expanding=True))
 
-            rows = autocab_db.execute(stmt, {"callsigns": all_referred_callsigns}).fetchall()
-            for row in rows:
+            for row in autocab_db.execute(totals_stmt, {"callsigns": all_referred_callsigns}).fetchall():
                 booking_map[row.driver_callsign] = {
-                    "completed_all":    row.completed_all    or 0,
-                    "completed_15d":    row.completed_15d    or 0,
-                    "last_booking_at":  row.last_booking_at.isoformat() if row.last_booking_at else None,
+                    "completed_all":   row.completed_all  or 0,
+                    "completed_15d":   row.completed_15d  or 0,
+                    "last_booking_at": row.last_booking_at.isoformat() if row.last_booking_at else None,
                 }
+
+            # Query 2 — fecha exacta en que se alcanzó cada milestone (viaje N)
+            milestone_stmt = text("""
+                SELECT driver_callsign, trip_num, archive_time
+                FROM (
+                    SELECT
+                        driver_callsign,
+                        archive_time,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY driver_callsign
+                            ORDER BY archive_time
+                        ) AS trip_num
+                    FROM bookings
+                    WHERE archive_reason = 'Completed'
+                      AND driver_callsign IN :callsigns
+                ) ranked
+                WHERE trip_num IN (1, 15, 25, 50, 100)
+                ORDER BY driver_callsign, trip_num
+            """).bindparams(bindparam("callsigns", expanding=True))
+
+            for row in autocab_db.execute(milestone_stmt, {"callsigns": all_referred_callsigns}).fetchall():
+                milestone_map.setdefault(row.driver_callsign, []).append({
+                    "trip_num":   row.trip_num,
+                    "reached_at": row.archive_time.isoformat() if row.archive_time else None,
+                })
+
         except OperationalError:
-            pass   # Si la BD de Autocab no está disponible, seguimos sin stats
+            pass   # Autocab DB no disponible — continuamos sin stats
+
+    # ── Helper: enriquecer un referido con stats + HERO + semana ─────────
+    _milestone_by_trips = {m["viajes"]: (i + 1, m["parcial"]) for i, m in enumerate(_HERO_MILESTONES)}
+
+    def _enrich_referred(r: dict) -> dict:
+        cs      = r["callsign"]
+        stats   = booking_map.get(cs, {})
+        completed = stats.get("completed_all", 0)
+        hero    = _calc_hero(completed)
+
+        milestones = []
+        for ms in milestone_map.get(cs, []):
+            level, parcial = _milestone_by_trips.get(ms["trip_num"], (0, 0))
+            if level:
+                milestones.append({
+                    "level":      level,
+                    "viajes":     ms["trip_num"],
+                    "parcial":    parcial,
+                    "reached_at": ms["reached_at"],
+                })
+
+        this_week_milestones = []
+        for ms in milestones:
+            if ms["reached_at"]:
+                ra = datetime.fromisoformat(ms["reached_at"]).date()
+                if week_start <= ra < week_end:
+                    this_week_milestones.append(ms)
+
+        return {
+            **r,
+            "completed_trips":       completed,
+            "completed_15d":         stats.get("completed_15d", 0),
+            "last_booking_at":       stats.get("last_booking_at"),
+            "hero_level":            hero["level"],
+            "hero_earned":           hero["earned"],
+            "hero_ongoing":          hero["ongoing"],
+            "hero_milestones":       milestones,
+            "this_week_milestones":  this_week_milestones,
+            "this_week_bonus":       sum(m["parcial"] for m in this_week_milestones),
+        }
 
     # ── Construir respuesta ──────────────────────────────────────────────
     referrers = []
     for ref_value, referred_list in groups.items():
-        referrer = phone_map.get(ref_value)
-
-        enriched_referred = []
-        referrer_total_bonus = 0
-
-        for r in referred_list:
-            stats = booking_map.get(r["callsign"])
-            if stats:
-                completed = stats["completed_all"]
-                hero      = _calc_hero(completed)
-                referrer_total_bonus += hero["earned"]
-                enriched_referred.append({
-                    **r,
-                    "completed_trips":  completed,
-                    "completed_15d":    stats["completed_15d"],
-                    "last_booking_at":  stats["last_booking_at"],
-                    "hero_level":       hero["level"],
-                    "hero_earned":      hero["earned"],
-                    "hero_ongoing":     hero["ongoing"],
-                })
-            else:
-                enriched_referred.append({
-                    **r,
-                    "completed_trips": 0,
-                    "completed_15d":   0,
-                    "last_booking_at": None,
-                    "hero_level":      0,
-                    "hero_earned":     0,
-                    "hero_ongoing":    False,
-                })
+        referrer         = phone_map.get(ref_value)
+        enriched_referred = [_enrich_referred(r) for r in referred_list]
 
         referrers.append({
             "ref_value":        ref_value,
             "callsign":         referrer.get("callsign") if referrer else None,
             "full_name":        referrer.get("fullName") if referrer else None,
             "referred_count":   len(enriched_referred),
-            "total_hero_bonus": referrer_total_bonus,
+            "total_hero_bonus": sum(r["hero_earned"]      for r in enriched_referred),
+            "this_week_bonus":  sum(r["this_week_bonus"]  for r in enriched_referred),
             "referred":         enriched_referred,
         })
 
     referrers.sort(key=lambda x: x["referred_count"], reverse=True)
+
+    # ── Pagos de la semana (solo referidores con bono > 0 esta semana) ───
+    weekly_referrers = []
+    for ref in referrers:
+        drivers_this_week = [
+            {
+                "driver_id":  r["driver_id"],
+                "callsign":   r["callsign"],
+                "full_name":  r["full_name"],
+                "milestones": r["this_week_milestones"],
+                "bonus":      r["this_week_bonus"],
+            }
+            for r in ref["referred"]
+            if r["this_week_bonus"] > 0
+        ]
+        if drivers_this_week:
+            weekly_referrers.append({
+                "ref_value":       ref["ref_value"],
+                "callsign":        ref["callsign"],
+                "full_name":       ref["full_name"],
+                "this_week_bonus": ref["this_week_bonus"],
+                "drivers":         drivers_this_week,
+            })
+
+    weekly_referrers.sort(key=lambda x: x["this_week_bonus"], reverse=True)
 
     return {
         "company":         {"id": company.id, "name": company.name},
         "total_drivers":   len(drivers),
         "total_referrers": len(referrers),
         "total_referred":  sum(r["referred_count"] for r in referrers),
-        "hero_plan": _HERO_MILESTONES + [{"viajes": None, "parcial": _HERO_ONGOING_BONUS}],
+        "hero_plan":       _HERO_MILESTONES + [{"viajes": None, "parcial": _HERO_ONGOING_BONUS}],
         "referrers":       referrers,
+        "weekly_payments": {
+            "week_start":   week_start.isoformat(),
+            "week_end":     (week_end - timedelta(days=1)).isoformat(),
+            "total_to_pay": sum(r["this_week_bonus"] for r in referrers),
+            "referrers":    weekly_referrers,
+        },
     }
 
 
@@ -422,11 +498,23 @@ def get_driver_accounts(
 
     txs, events = _load_tx_and_events(db, rows)
 
+    # Conductores con pago activo en la cola (pending o approved)
+    driver_ids = [r.driver_id for r in rows]
+    queue_map: dict[int, str] = {}
+    if driver_ids:
+        active_queue = db.query(PaymentQueue).filter(
+            PaymentQueue.company_id == company_id,
+            PaymentQueue.source     == "driver_balance",
+            PaymentQueue.driver_id.in_(driver_ids),
+            PaymentQueue.status.in_(("pending", "approved")),
+        ).all()
+        queue_map = {q.driver_id: q.status for q in active_queue}
+
     return {
         "company":              {"id": company.id, "name": company.name},
         "drivers_with_balance": len(rows),
         "fetched_at":           rows[0].fetched_at.isoformat() if rows else None,
-        "results":              [_row_to_dict(r, txs.get(r.peibo_transaction_id), events.get(r.peibo_transaction_id)) for r in rows],
+        "results":              [_row_to_dict(r, txs.get(r.peibo_transaction_id), events.get(r.peibo_transaction_id), queue_map.get(r.driver_id)) for r in rows],
     }
 
 

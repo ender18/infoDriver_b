@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from app.routers import users, auth, permissions, roles, sms, company, tools, stats, webhooks, banks, payments
+from app.routers import users, auth, permissions, roles, sms, company, tools, stats, webhooks, banks, payments, bonuses, payment_queue
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="Mi API")
@@ -25,6 +25,8 @@ app.include_router(stats.router,    prefix="/api")
 app.include_router(webhooks.router, prefix="/api")
 app.include_router(banks.router,    prefix="/api")
 app.include_router(payments.router, prefix="/api")
+app.include_router(bonuses.router,       prefix="/api")
+app.include_router(payment_queue.router, prefix="/api")
 
 
 @app.get("/")

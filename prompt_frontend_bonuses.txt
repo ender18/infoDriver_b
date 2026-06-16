@@ -1,0 +1,161 @@
+Crea la vista `src/views/modules/Bonuses.vue` para el módulo de Bonos de conductores dentro de Herramientas.
+
+---
+
+## Ruta y navegación
+
+- Ruta: `/tools/bonuses`
+- Agregar tarjeta en Tools.vue y ruta en `src/router/modules/modules.js`:
+  path: '/tools/bonuses', name: 'bonuses', component: import de Bonuses.vue,
+  meta: { requiresAuth: true, title: 'Bonos Conductores', requiredPermission: 'stats:read' }
+
+---
+
+## Endpoints
+
+### 1. Bonos diarios por rango de fechas
+GET /api/bonuses/drivers/daily?company_id={id}&date_from=YYYY-MM-DD&date_to=YYYY-MM-DD
+
+Respuesta:
+```json
+{
+  "company": { "id": 1, "name": "..." },
+  "date_from": "2026-06-09",
+  "date_to": "2026-06-15",
+  "bonus_config": {
+    "daily_trips": [
+      { "trips": 10, "bonus": 200 },
+      { "trips": 15, "bonus": 100 }
+    ],
+    "first_trip_bonus": 1000
+  },
+  "total_drivers_with_bonus": 12,
+  "total_bonus_amount": 4800,
+  "drivers": [
+    {
+      "callsign": "A12",
+      "forename": "Juan",
+      "surname": "Pérez",
+      "full_name": "Juan Pérez",
+      "mobile": "5512345678",
+      "total_bonus": 600,
+      "days": [
+        { "date": "2026-06-09", "completed_trips": 15, "level_reached": 2, "bonus": 300 },
+        { "date": "2026-06-10", "completed_trips": 12, "level_reached": 1, "bonus": 200 }
+      ]
+    }
+  ]
+}
+```
+
+Notas:
+- bonus_config.daily_trips viene ordenado por trips ASC; cada bonus es ADICIONAL al nivel anterior
+  - 10 viajes → gana 200
+  - 15 viajes → gana 200 + 100 = 300 (level_reached = 2)
+- Solo incluye conductores que ganaron algún bono en el periodo
+- Ordenado por total_bonus DESC
+
+### 2. Bono primeros N viajes
+GET /api/bonuses/drivers/first-trip?company_id={id}&date_from=YYYY-MM-DD&date_to=YYYY-MM-DD
+
+Respuesta:
+```json
+{
+  "company": { "id": 1, "name": "..." },
+  "date_from": "2026-06-09",
+  "date_to": "2026-06-15",
+  "first_trips_count": 5,
+  "first_trips_bonus": 1000,
+  "total_drivers": 3,
+  "total_bonus_amount": 3000,
+  "drivers": [
+    {
+      "callsign": "B01",
+      "forename": "Pedro",
+      "surname": "López",
+      "full_name": "Pedro López",
+      "mobile": "5598765432",
+      "qualifying_trip_at": "2026-06-10T14:30:00",
+      "bonus": 1000
+    }
+  ]
+}
+```
+
+Notas:
+- first_trips_count: número de viajes que el conductor debe completar para ganar el bono (configurable, default 5)
+- Solo incluye conductores cuyo viaje #N ever (el que "califica") cayó en el rango de fechas
+- Es decir: conductores que completaron exactamente su 5to viaje histórico esta semana
+- Ordenado por qualifying_trip_at ASC
+
+---
+
+## UI
+
+### Controles (parte superior)
+
+1. Botón "Volver a Herramientas".
+2. Selector de compañía (v-select). Al cambiar, limpiar resultados.
+3. Date pickers: Fecha inicio y Fecha fin (v-date-input o similar).
+   - Por defecto: semana actual (lunes a hoy).
+4. Dos botones de acción:
+   - "Bonos diarios" → llama a /daily
+   - "Primer viaje" → llama a /first-trip
+   Ambos muestran loading mientras cargan. Solo uno activo a la vez.
+5. Mostrar el plan actual de la compañía como referencia visual (chips informativos):
+   "≥10 viajes/día → $200" | "≥15 viajes/día → $300" | "Primeros 5 viajes → $1,000"
+   (usar bonus_config de la respuesta para renderizar dinámicamente — no hardcodear;
+    el chip de primeros viajes usa first_trips_count y first_trips_bonus)
+
+---
+
+### Vista "Bonos diarios"
+
+Chips de resumen:
+- Conductores con bono: {total_drivers_with_bonus}
+- Total a pagar: ${total_bonus_amount} MXN
+
+v-data-table — columnas:
+Callsign | Nombre | Días con bono | Total bono
+
+Al expandir fila de conductor — tabla de días:
+Fecha | Viajes completados | Nivel | Bono del día
+
+- "Nivel": mostrar como v-chip de color:
+  - Nivel 1: teal ("Nv.1 · $200")
+  - Nivel 2: green ("Nv.2 · $300")
+  - Nivel N: amber/orange para niveles más altos
+- "Bono del día": formateado como "$XXX"
+
+Si no hay conductores: mensaje vacío con ícono mdi-trophy-outline.
+
+---
+
+### Vista "Primer viaje"
+
+Chips de resumen:
+- Conductores nuevos: {total_drivers}
+- Total a pagar: ${total_bonus_amount} MXN
+
+Subtítulo informativo: "Conductores que completaron su viaje #{first_trips_count} histórico en este periodo"
+
+v-data-table — columnas:
+Callsign | Nombre | Teléfono | Viaje clasificatorio (fecha+hora) | Bono
+
+- "Bono": v-chip color="amber" con "$1,000"
+- "Viaje clasificatorio": qualifying_trip_at formato DD/MM/YYYY HH:mm
+
+Si no hay conductores: mensaje vacío con ícono mdi-flag-checkered.
+
+---
+
+## Consideraciones
+
+- Usar apiClient de `@/services/api`
+- Cargar compañías desde GET /api/companies/ al montar
+- Mismo patrón de snackbar para errores
+- No crear stores nuevos
+- Permiso requerido: stats:read
+- Montos en MXN, formatear con signo $ y separador de miles
+- El plan de bonos (bonus_config) viene en la respuesta — renderizarlo dinámicamente,
+  no hardcodear los valores $200/$300/$1,000 en el template

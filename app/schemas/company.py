@@ -3,6 +3,20 @@ from typing import Optional
 from datetime import datetime
 
 
+class DailyTripLevel(BaseModel):
+    trips: int = Field(..., gt=0, description="Mínimo de viajes completados en el día")
+    bonus: int = Field(..., gt=0, description="Bono adicional en MXN al alcanzar este nivel")
+
+
+class BonusConfig(BaseModel):
+    daily_trips: list[DailyTripLevel] = [
+        DailyTripLevel(trips=10, bonus=200),
+        DailyTripLevel(trips=15, bonus=100),
+    ]
+    first_trips_count: int = Field(default=5,    gt=0, description="Número de primeros viajes para ganar el bono inicial")
+    first_trips_bonus: int = Field(default=1000, gt=0, description="Bono por completar los primeros N viajes ever (MXN)")
+
+
 class ValidationConfig(BaseModel):
     allowed_towns: list[str]          = ["Mexico City", "Xalapa", "EDOMEX", "Veracruz"]
     allowed_regions: list[str]        = ["CDMX", "EDOMEX", "Veracruz"]
@@ -50,6 +64,7 @@ class CompanyResponse(BaseModel):
     peibo_api_key: Optional[str] = None
     peibo_originator_account: Optional[str] = None
     validation_config: Optional[ValidationConfig] = None
+    bonus_config: Optional[BonusConfig] = None
     is_active: bool
     created_at: datetime
     updated_at: Optional[datetime] = None

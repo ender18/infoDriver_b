@@ -1,0 +1,87 @@
+Actualizar la vista PaymentQueue.vue — el botón "Aprobar" ahora ejecuta el pago Peibo
+directamente y el item pasa a estado "paid".
+
+---
+
+## Cambios en endpoints
+
+### Aprobar uno (ejecuta pago)
+PATCH /api/payment-queue/{id}/approve
+Body (opcional): { "adjusted_amount": 250.0 }
+
+Respuesta exitosa:
+```json
+{
+  "id": 1, "status": "paid",
+  "peibo_transaction_id": 42,
+  "tracking_code": "TRK-ABC123",
+  ...resto de campos del item...
+}
+```
+
+Errores posibles:
+- 400: error de Peibo (ej. cuenta inválida) → mostrar detail en snackbar
+- 422: banco no encontrado en catálogo, longitud de cuenta inválida → mostrar en snackbar
+- 502: Peibo no disponible
+
+### Aprobar en lote (ejecuta todos)
+POST /api/payment-queue/bulk-approve?company_id={id}
+Body: { "ids": [1,2,3] }
+
+Respuesta:
+```json
+{
+  "paid": 2,
+  "errors": 1,
+  "results": [
+    { "id": 1, "tracking_code": "TRK-ABC" },
+    { "id": 2, "tracking_code": "TRK-DEF" }
+  ],
+  "failed": [
+    { "id": 3, "error": "Banco no encontrado en catálogo: 'OTRO'" }
+  ]
+}
+```
+
+---
+
+## Cambios en UI
+
+### Estado "paid" — nuevo
+
+Agregar a la tabla de estados:
+| paid | Pagado | blue-darken-1 |
+
+Un item en estado "paid" no tiene acciones disponibles (sin botones de aprobar/rechazar/descartar).
+
+### Botón "Aprobar" (fila individual)
+
+Al hacer clic:
+1. Abrir mini-dialog con campo "Monto ajustado" (opcional)
+2. Al confirmar → llamar PATCH /{id}/approve
+3. Si éxito: snackbar "Pago ejecutado — tracking: {tracking_code}" + recargar lista
+4. Si error: snackbar con el mensaje de error del backend
+
+### Botón "Aprobar seleccionados" (bulk)
+
+Al hacer clic → llamar POST /bulk-approve con los ids seleccionados.
+Al terminar, mostrar resumen en snackbar:
+- Si todo OK: "X pagos ejecutados correctamente"
+- Si hay errores: "X pagos ejecutados, Y fallaron" + mostrar los errores en un dialog o lista
+
+### Módulo Transacciones PEIBO
+
+En la vista de Transacciones PEIBO (si ya existe), la respuesta ahora incluye:
+- `callsign` — callsign del conductor pagado
+- `beneficiary_name` — nombre completo
+- `original_amount` — monto antes de ajuste (null si no hubo ajuste)
+- `amount` — monto efectivamente pagado
+
+Mostrar en la tabla/detalle de transacciones si aún no están visibles.
+source_type = "payment_queue" identifica los pagos que vinieron de la cola.
+
+---
+
+## Sin otros cambios
+
+El resto de la UI (filtros, rechazo, descarte) queda igual.

@@ -18,6 +18,11 @@ class PeiboTransaction(Base):
     source_type    = Column(String(50),  nullable=False)   # driver_payment | invoice | ...
     source_id      = Column(Integer,     nullable=False)   # ID en la tabla fuente
 
+    # Datos del beneficiario (snapshot al momento del pago)
+    callsign         = Column(String(50),    nullable=True)
+    beneficiary_name = Column(String(100),   nullable=True)
+    original_amount  = Column(Numeric(12,2), nullable=True)  # antes de ajuste contadora
+
     # Auditoría
     created_by     = Column(Integer, ForeignKey("users.id"), nullable=True)
     error_message  = Column(Text,    nullable=True)

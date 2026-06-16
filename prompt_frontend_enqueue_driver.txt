@@ -1,0 +1,18 @@
+En el módulo de Saldos de Conductores, el botón "Pagar" de cada conductor ya no paga directo — ahora encola el pago para aprobación.
+
+## Cambio en el endpoint
+
+El endpoint es el mismo: POST /api/payments/transfer/driver/{driver_id}?company_id={id}
+
+La respuesta cambia de un pago ejecutado a:
+```json
+{ "status": "enqueued", "queue_id": 5, "driver_id": 123, "amount": 300.0, "message": "Pago enviado a la cola de aprobación" }
+```
+
+## Cambios en la UI
+
+1. Cambiar el texto del botón de "Pagar" → "Encolar pago"
+2. Cambiar el ícono del botón si aplica (sugerencia: mdi-tray-arrow-up o mdi-clock-outline)
+3. El mensaje de éxito en el snackbar: "Pago encolado correctamente — pendiente de aprobación"
+4. Si el conductor ya tiene un pago en cola, el backend devuelve 400 con el mensaje
+   "Este conductor ya tiene un pago en cola (id=X, estado=pending)" — mostrarlo en el snackbar de error normalmente

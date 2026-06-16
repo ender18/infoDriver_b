@@ -1,0 +1,16 @@
+En el módulo de Saldos de Conductores, el GET /api/tools/drivers/accounts ahora devuelve
+payment_status = "pending" cuando el conductor ya tiene un pago encolado (aunque no tenga
+PeiboTransaction todavía).
+
+## Comportamiento del botón según payment_status
+
+| payment_status | Texto del botón  | Estado    |
+|----------------|------------------|-----------|
+| null           | Encolar pago     | Habilitado|
+| "pending"      | En cola          | Deshabilitado + color amber/warning |
+| "approved"     | Aprobado         | Deshabilitado + color green |
+| "success"      | Pagado           | Deshabilitado + color green |
+| "error"        | Encolar pago     | Habilitado |
+
+No hay cambio en la llamada al endpoint — solo ajustar el texto, color y estado disabled
+del botón según el valor de payment_status que ya viene en cada item del results[].

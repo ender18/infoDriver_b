@@ -24,6 +24,9 @@ class Company(Base):
     # Reglas de validación configurables por empresa
     validation_config = Column(JSON, nullable=True)
 
+    # Plan de bonos configurables por empresa
+    bonus_config = Column(JSON, nullable=True)
+
     is_active = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), nullable=True)
